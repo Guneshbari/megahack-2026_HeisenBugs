@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Bell, Clock, RefreshCw, ChevronDown, Server, Activity, AlertTriangle, Zap } from 'lucide-react';
+import { Bell, Clock, RefreshCw, ChevronDown, Server, Activity, AlertTriangle, Zap, LogOut } from 'lucide-react';
 import {
   getOnlineSystems,
   getDegradedSystems,
@@ -7,6 +7,7 @@ import {
   getTotalEventCount,
 } from '../../data/mockData';
 import { useDashboard, TIME_RANGE_LABELS, REFRESH_LABELS, type TimeRange, type AutoRefresh } from '../../context/DashboardContext';
+import { useAuth } from '../../context/AuthContext';
 
 const TIME_RANGES: TimeRange[] = ['5m', '15m', '1h', '6h', '24h'];
 const REFRESH_OPTIONS: AutoRefresh[] = ['off', '5s', '10s', '30s', '1m'];
@@ -17,17 +18,26 @@ export default function Topbar() {
   const criticals = getCriticalAlertCount();
   const totalEvents = getTotalEventCount();
   const { timeRange, setTimeRange, autoRefresh, setAutoRefresh } = useDashboard();
+  const { user, logout } = useAuth();
 
   const [showTimeDropdown, setShowTimeDropdown] = useState(false);
   const [showRefreshDropdown, setShowRefreshDropdown] = useState(false);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
   const timeRef = useRef<HTMLDivElement>(null);
   const refreshRef = useRef<HTMLDivElement>(null);
+  const userRef = useRef<HTMLDivElement>(null);
+
+  // Get user initials
+  const initials = user?.name
+    ? user.name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2)
+    : 'U';
 
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (timeRef.current && !timeRef.current.contains(e.target as Node)) setShowTimeDropdown(false);
       if (refreshRef.current && !refreshRef.current.contains(e.target as Node)) setShowRefreshDropdown(false);
+      if (userRef.current && !userRef.current.contains(e.target as Node)) setShowUserDropdown(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -85,7 +95,7 @@ export default function Topbar() {
         {/* Time Range Selector */}
         <div ref={timeRef} className="relative">
           <button
-            onClick={() => { setShowTimeDropdown(!showTimeDropdown); setShowRefreshDropdown(false); }}
+            onClick={() => { setShowTimeDropdown(!showTimeDropdown); setShowRefreshDropdown(false); setShowUserDropdown(false); }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-bg-primary/50 text-xs text-text-secondary hover:text-text-primary hover:border-signal-primary/30 transition-all"
           >
             <Clock className="w-3.5 h-3.5 text-signal-primary" />
@@ -114,7 +124,7 @@ export default function Topbar() {
         {/* Auto-Refresh Selector */}
         <div ref={refreshRef} className="relative">
           <button
-            onClick={() => { setShowRefreshDropdown(!showRefreshDropdown); setShowTimeDropdown(false); }}
+            onClick={() => { setShowRefreshDropdown(!showRefreshDropdown); setShowTimeDropdown(false); setShowUserDropdown(false); }}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs transition-all ${
               autoRefresh !== 'off'
                 ? 'border-signal-highlight/40 bg-signal-highlight/10 text-signal-highlight'
@@ -151,11 +161,32 @@ export default function Topbar() {
           </span>
         </button>
 
-        {/* Avatar */}
-        <div className="w-7 h-7 rounded-full bg-signal-primary/20 flex items-center justify-center text-[10px] font-semibold text-signal-primary border border-signal-primary/30">
-          GS
+        {/* User Avatar with Dropdown */}
+        <div ref={userRef} className="relative">
+          <button
+            onClick={() => { setShowUserDropdown(!showUserDropdown); setShowTimeDropdown(false); setShowRefreshDropdown(false); }}
+            className="w-7 h-7 rounded-full bg-signal-primary/20 flex items-center justify-center text-[10px] font-semibold text-signal-primary border border-signal-primary/30 cursor-pointer hover:bg-signal-primary/30 transition-colors"
+          >
+            {initials}
+          </button>
+          {showUserDropdown && (
+            <div className="absolute right-0 top-full mt-1.5 w-52 glass-panel rounded-lg py-2 shadow-xl shadow-black/40 z-50 animate-fade-in">
+              <div className="px-3 py-2 border-b border-border">
+                <p className="text-xs font-semibold text-text-primary">{user?.name}</p>
+                <p className="text-[10px] text-text-muted mt-0.5">{user?.email}</p>
+              </div>
+              <button
+                onClick={() => { setShowUserDropdown(false); logout(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 mt-1 text-xs text-text-secondary hover:text-accent-red hover:bg-bg-hover transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                Sign Out
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </header>
   );
 }
+
