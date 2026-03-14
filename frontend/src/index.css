@@ -2,15 +2,15 @@
 
 :root {
   --color-bg-primary: #000000;
-  --color-bg-surface: #05080f;
-  --color-bg-hover: #0d1320;
-  --color-bg-glass: rgba(5, 8, 15, 0.75);
-  --color-border: #1a2230;
-  --color-border-hover: #2a3544;
-  --color-border-glow: rgba(0, 229, 255, 0.25);
-  --color-text-primary: #e6edf3;
-  --color-text-secondary: #8b9bb4;
-  --color-text-muted: #556171;
+  --color-bg-surface: #0a101d; /* Lightened from 05080f for clearer depth against black */
+  --color-bg-hover: #111a2e; /* Lightened for clear hover states */
+  --color-bg-glass: rgba(10, 16, 29, 0.85); /* Slightly more opaque glass */
+  --color-border: #243045; /* Lighter border for clear section separation */
+  --color-border-hover: #364866;
+  --color-border-glow: rgba(0, 229, 255, 0.35); /* Increased glow base visibility */
+  --color-text-primary: #ffffff; /* Brighter pure white for primary text */
+  --color-text-secondary: #a3b8cc; /* Lightened secondary text for high contrast */
+  --color-text-muted: #7387a3; /* Lightened muted text so it remains readable */
 
   --color-signal-primary: #00e5ff;
   --color-signal-secondary: #8b5cf6;
@@ -44,6 +44,8 @@
     background-color: var(--color-bg-primary);
     color: var(--color-text-primary);
     min-height: 100vh;
+    letter-spacing: 0.015em; /* Subtle spacing for better long-form reading */
+    line-height: 1.6; /* Relaxed line height */
   }
 
   #root {
@@ -51,15 +53,15 @@
   }
 
   ::-webkit-scrollbar {
-    width: 5px;
-    height: 5px;
+    width: 8px; /* Increased from 5px for better usability */
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
     background: var(--color-border);
-    border-radius: 3px;
+    border-radius: 4px; /* Smoother corner */
   }
   ::-webkit-scrollbar-thumb:hover {
     background: var(--color-border-hover);

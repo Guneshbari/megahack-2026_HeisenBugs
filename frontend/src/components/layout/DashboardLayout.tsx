@@ -9,7 +9,7 @@ export default function DashboardLayout() {
       <Sidebar />
       <Topbar />
       <GlobalFilterBar />
-      <main className="ml-[220px] mt-[96px] p-6">
+      <main className="ml-[220px] mt-[96px] p-8">
         <Outlet />
       </main>
     </div>
