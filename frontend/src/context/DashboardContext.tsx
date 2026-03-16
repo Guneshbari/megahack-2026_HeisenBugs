@@ -65,6 +65,8 @@ interface DashboardState {
 
   // Computed
   filteredEvents: TelemetryEvent[];
+  filteredAlerts: Alert[];
+  filteredSystems: SystemInfo[];
   refreshTick: number;
   clearFilters: () => void;
   hasActiveFilters: boolean;
@@ -183,6 +185,33 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
     return true;
   });
 
+  // Filter alerts based on global state
+  const filteredAlerts = alerts.filter((a) => {
+    const now = Date.now();
+    const alertTime = new Date(a.triggered_at).getTime();
+    if (alertTime < now - TIME_RANGE_MS[timeRange]) return false;
+    if (selectedSystems.length > 0 && !selectedSystems.includes(a.hostname)) return false;
+    if (selectedSeverities.length > 0 && !selectedSeverities.includes(a.severity)) return false;
+    if (searchQuery) {
+      const term = searchQuery.toLowerCase();
+      if (!a.rule.toLowerCase().includes(term) && 
+          !a.title.toLowerCase().includes(term) && 
+          !a.hostname.toLowerCase().includes(term)) return false;
+    }
+    return true;
+  });
+
+  // Filter systems based on global state (no time filtering for status, just metadata filtering)
+  const filteredSystems = systems.filter((s) => {
+    if (selectedSystems.length > 0 && !selectedSystems.includes(s.hostname)) return false;
+    if (searchQuery) {
+      const term = searchQuery.toLowerCase();
+      if (!s.hostname.toLowerCase().includes(term) && 
+          !s.system_id.toLowerCase().includes(term)) return false;
+    }
+    return true;
+  });
+
   return (
     <DashboardContext.Provider
       value={{
@@ -205,6 +234,8 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
         isLoading,
         apiError,
         filteredEvents,
+        filteredAlerts,
+        filteredSystems,
         refreshTick,
         clearFilters,
         hasActiveFilters,

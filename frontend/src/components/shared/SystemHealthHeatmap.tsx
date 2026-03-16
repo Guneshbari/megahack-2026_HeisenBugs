@@ -24,9 +24,9 @@ const levelColors: Record<string, { bg: string; border: string; text: string; gl
 
 export default function SystemHealthHeatmap() {
   const navigate = useNavigate();
-  const { filteredEvents, systems } = useDashboard();
+  const { filteredEvents, filteredSystems } = useDashboard();
 
-  const systemHealth = systems.map((s) => ({
+  const systemHealth = filteredSystems.map((s) => ({
     ...s,
     health: getHealthScore(s, filteredEvents),
   }));

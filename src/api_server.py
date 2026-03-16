@@ -4,6 +4,8 @@ Serves live PostgreSQL data to the dashboard frontend.
 Uses connection pooling for stable performance under frequent polling.
 """
 
+import json
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -13,6 +15,8 @@ import psycopg2
 import psycopg2.pool
 import psycopg2.extras
 import typing
+
+from shared_constants import DB_CONFIG
 
 # ============================================================================
 # APP SETUP
@@ -36,13 +40,7 @@ app.add_middleware(
 # DATABASE CONNECTION POOL
 # ============================================================================
 
-DB_CONFIG = {
-    "dbname": "sentinel_logs",
-    "user": "sentinel_admin",
-    "password": "changeme123",
-    "host": "localhost",
-    "port": 5432,
-}
+# DB_CONFIG imported from shared_constants
 
 pool = None
 
@@ -78,6 +76,32 @@ def shutdown():
 
 
 # ============================================================================
+# HELPERS
+# ============================================================================
+
+
+def parse_diagnostic_context(raw_diag):
+    """Parse diagnostic_context JSON and extract a human-readable description."""
+    diag = raw_diag
+    if isinstance(diag, str):
+        try:
+            diag = json.loads(diag)
+        except Exception:
+            diag = None
+    desc = ""
+    if isinstance(diag, dict):
+        desc = (
+            diag.get("message")
+            or diag.get("description")
+            or diag.get("summary")
+            or diag.get("error")
+            or diag.get("detail")
+            or ""
+        )
+    return diag, desc
+
+
+# ============================================================================
 # API ENDPOINTS
 # ============================================================================
 
@@ -92,7 +116,6 @@ def get_events(limit: int = 100):
             """, (limit,))
             rows = typing.cast(typing.List[typing.Dict[str, typing.Any]], cur.fetchall())
 
-    import json
     for row in rows:
         # Normalize numeric fields for frontend charts
         row["cpu_usage_percent"] = float(row.get("cpu_usage_percent") or 0)
@@ -105,24 +128,10 @@ def get_events(limit: int = 100):
         row['event_time'] = row['ingested_at']
 
         # Parse diagnostic_context and extract fault_description
-        diag = row.get('diagnostic_context')
-        if isinstance(diag, str):
-            try:
-                diag = json.loads(diag)
-                row['diagnostic_context'] = diag
-            except Exception:
-                diag = None
-        if isinstance(diag, dict):
-            row['fault_description'] = (
-                diag.get('message')
-                or diag.get('description')
-                or diag.get('summary')
-                or diag.get('error')
-                or diag.get('detail')
-                or ''
-            )
-        else:
-            row['fault_description'] = ''
+        diag, desc = parse_diagnostic_context(row.get('diagnostic_context'))
+        if diag is not None:
+            row['diagnostic_context'] = diag
+        row['fault_description'] = desc
 
         # Convert datetimes to ISO strings for JSON serialization
         for key in ("ingested_at", "event_time"):
@@ -139,14 +148,7 @@ def get_systems():
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 WITH latest AS (
-                    SELECT 
-                        system_id,
-                        hostname,
-                        cpu_usage_percent,
-                        memory_usage_percent,
-                        disk_free_percent,
-                        os_version,
-                        last_seen as ingested_at
+                    SELECT *
                     FROM system_heartbeats
                 ),
                 counts AS (
@@ -168,7 +170,7 @@ def get_systems():
                     l.memory_usage_percent,
                     l.disk_free_percent,
                     l.os_version,
-                    l.ingested_at AS last_seen,
+                    l.last_seen,
                     COALESCE(c.total_events, 0) AS total_events,
                     COALESCE(cc.critical_count, 0) AS critical_count
                 FROM latest l
@@ -235,7 +237,6 @@ def get_alerts():
             """)
             rows = typing.cast(typing.List[typing.Dict[str, typing.Any]], cur.fetchall())
 
-    import json
     alerts = []
     for i, row in enumerate(rows):
         event_time = row.get("event_time")
@@ -243,22 +244,7 @@ def get_alerts():
             event_time = event_time.isoformat()
 
         # Extract description from diagnostic_context
-        diag = row.get("diagnostic_context")
-        if isinstance(diag, str):
-            try:
-                diag = json.loads(diag)
-            except Exception:
-                diag = None
-        desc = ""
-        if isinstance(diag, dict):
-            desc = (
-                diag.get("message")
-                or diag.get("description")
-                or diag.get("summary")
-                or diag.get("error")
-                or diag.get("detail")
-                or ""
-            )
+        _, desc = parse_diagnostic_context(row.get("diagnostic_context"))
 
         alerts.append({
             "alert_id": f"ALERT-{row.get('event_record_id', i)}",

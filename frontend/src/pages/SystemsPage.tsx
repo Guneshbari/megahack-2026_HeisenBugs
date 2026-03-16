@@ -12,10 +12,10 @@ const statusConfig: Record<SystemStatus, { color: string; label: string; dot: st
 
 export default function SystemsPage() {
   const navigate = useNavigate();
-  const { systems, allEvents } = useDashboard();
+  const { filteredSystems, filteredEvents, timeRange } = useDashboard();
 
-  const onlineCount = systems.filter((s) => s.status === 'online').length;
-  const degradedCount = systems.filter((s) => s.status === 'degraded').length;
+  const onlineCount = filteredSystems.filter((s) => s.status === 'online').length;
+  const degradedCount = filteredSystems.filter((s) => s.status === 'degraded').length;
 
   return (
     <div className="space-y-5">
@@ -35,22 +35,20 @@ export default function SystemsPage() {
             {degradedCount} Degraded
           </span>
           <span className="px-2.5 py-1 rounded-lg glass-panel text-text-secondary text-[11px]">
-            {systems.length} Total
+            {filteredSystems.length} Total
           </span>
         </div>
       </div>
 
       {/* Systems Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {systems.map((system) => {
+        {filteredSystems.map((system) => {
           const status = statusConfig[system.status];
 
           // Recent event info
-          const systemEvents = allEvents.filter((e) => e.system_id === system.system_id);
+          const systemEvents = filteredEvents.filter((e) => e.system_id === system.system_id);
           const recentEvent = systemEvents.sort((a, b) => new Date(b.event_time).getTime() - new Date(a.event_time).getTime())[0];
-          const eventRate5m = systemEvents.filter((e) => {
-            return new Date(e.event_time).getTime() > Date.now() - 5 * 60_000;
-          }).length;
+          const eventCount = systemEvents.length;
           const lastFault = recentEvent?.fault_type || 'None';
 
           return (
@@ -87,8 +85,8 @@ export default function SystemsPage() {
                 </div>
                 {/* Event rate */}
                 <div className="flex items-center gap-1">
-                  <span className="text-signal-primary font-semibold">{eventRate5m}</span>
-                  <span className="text-text-muted">evt/5m</span>
+                  <span className="text-signal-primary font-semibold">{eventCount}</span>
+                  <span className="text-text-muted">evt/{timeRange}</span>
                 </div>
                 {/* Last fault type */}
                 <span className="text-text-muted truncate flex-1 text-right">{lastFault}</span>

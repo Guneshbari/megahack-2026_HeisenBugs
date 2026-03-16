@@ -16,10 +16,10 @@ import {
 import { useDashboard } from '../context/DashboardContext';
 
 export default function OverviewPage() {
-  const { filteredEvents, systems, alerts } = useDashboard();
-  const degraded = getDegradedSystems(systems);
-  const criticalAlerts = getCriticalAlertCount(alerts);
-  const activeAlerts = getActiveAlerts(alerts).length;
+  const { filteredEvents, filteredSystems, filteredAlerts } = useDashboard();
+  const degraded = getDegradedSystems(filteredSystems);
+  const criticalAlerts = getCriticalAlertCount(filteredAlerts);
+  const activeAlerts = getActiveAlerts(filteredAlerts).length;
 
   // Recent critical/error events from filtered set
   const recentCritical = filteredEvents
@@ -39,7 +39,7 @@ export default function OverviewPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <DashboardCard
             title="Systems Online"
-            value={systems.filter(s => s.status === 'online').length}
+            value={filteredSystems.filter(s => s.status === 'online').length}
             subtitle={degraded > 0 ? `${degraded} degraded` : 'All healthy'}
             subtitleColor={degraded > 0 ? 'text-accent-amber' : 'text-signal-highlight'}
             icon={<Server className="w-5 h-5 text-signal-primary" />}

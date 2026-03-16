@@ -1,193 +1,579 @@
 # SentinelCore
 
-A production-grade Windows telemetry agent focused on **System Stability, Critical Fault Detection, and ML Training Data Generation**. Uses the modern Windows Eventing API (EvtQuery) to collect high-value system events, categorizes them for diagnostic ML pipelines, and streams them through a Kafka → PostgreSQL data pipeline.
+A production-grade **Windows Telemetry Agent** built for System Stability monitoring, Critical Fault Detection, and ML Training Data Generation. It uses the modern Windows Eventing API (`EvtQuery`) to collect high-value system events, classifies them, and streams them through a **Kafka → PostgreSQL → React Dashboard** pipeline with Prometheus + Grafana observability.
+
+---
 
 ## Architecture & Data Flow
 
-```mermaid
-graph TD
-    subgraph "Windows Host (Producer)"
-        WE[Windows Event Logs] --> |EvtQuery| COL[collector.py]
-        COL --> |Parse & Hash| CLS{ErrorClassifier}
-        CLS --> |Decorate| FMT[JSON Payload formatting\n+ Diagnostic Context]
-    end
-
-    subgraph "Local Fallback"
-        FMT -.-> |Network failure| LFS[(collected_events.json)]
-    end
-
-    subgraph "Linux Server / WSL (Broker & Consumer)"
-        FMT --> |Kafka Producer API\nacks=all, retries=5| KAFKA[Kafka Broker\nTopic: sentinel-events]
-        KAFKA --> |KafkaConsumer API| K2P[kafka_to_postgres.py]
-        K2P --> |psycopg2| PG[(PostgreSQL Database)]
-    end
-
-    classDef windows fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
-    classDef linux fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
-    classDef storage fill:#fff3e0,stroke:#e65100,stroke-width:2px;
-
-    class WE,COL,CLS,FMT windows;
-    class KAFKA,K2P linux;
-    class LFS,PG storage;
+```
+┌─────────────────────────────────────┐
+│         Windows Host                │
+│  Windows Event Logs                 │
+│       ↓ (EvtQuery)                  │
+│  collector.py                       │
+│  (classify, hash, deduplicate)      │
+└──────────────┬──────────────────────┘
+               │ Kafka Producer (port 9092)
+               ▼
+┌─────────────────────────────────────┐
+│         WSL / Linux Server          │
+│                                     │
+│  kafka_to_postgres.py               │
+│       ↓ (psycopg2)                  │
+│  PostgreSQL  (port 5432)            │
+│       ↑                             │
+│  api_server.py  ←─── (port 8080)   │──→  React Dashboard (port 5173)
+│  /metrics-export ↓                  │
+│  Prometheus      (port 9090)        │
+│       ↓                             │
+│  Grafana         (port 3000)        │
+└─────────────────────────────────────┘
 ```
 
-## Features (v4.0.0)
-
-### Log Collection & Classification
-
-- **Targeted Monitoring**: System, Kernel-Power, and DriverFrameworks logs.
-- **Auto-Classification Engine**: Classifies events into ML-ready labels (`SYSTEM_FAULT`, `DRIVER_ISSUE`, `SERVICE_ERROR`, `RESOURCE_WARNING`, `SECURITY_EVENT`, etc.).
-- **Diagnostic Context**: Attaches point-in-time system resource snapshots (CPU >90%, Mem >90%, Disk <10%) to the exact moment an error occurred.
-
-### Production Hardening
-
-- **Guaranteed Delivery**: Producer confirms every message explicitly via `future.get(timeout=10)`. No silent drops.
-- **Resilience**: Producer gracefully handles Kafka outages with exponential backoff reconnections, while Consumer handles DB outages identically.
-- **Transactional Consistency**: Consumer implements batch-level rollbacks and delays Kafka offset commits until DB insert is confirmed.
-- **Storage Guard**: Automatically pauses collection if system disk drops below 1GB free space.
-- **Graceful Elevation**: Detects Administrator privileges via channel probing and falls back gracefully when limited.
-
-### Data Pipeline (Kafka + PostgreSQL)
-
-- **Kafka Publishing**: Events streamed to Kafka topic `sentinel-events` via `kafka-python-ng`.
-- **PostgreSQL Consumer**: Standalone `kafka_to_postgres.py` script reads from Kafka and writes to PostgreSQL with idempotent dedup (`ON CONFLICT DO NOTHING`).
-- **Three Delivery Modes**: Local file (testing), Kafka pipeline, or HTTPS — switchable via environment variables.
-
-### Data Integrity
-
-- **Hardware-Tied Hashing**: SHA256 hashes for deduplication using `(raw_xml + machine_guid + record_id)`.
-- **Atomic Checkpoints**: Checkpoints only advance if transmission to the server succeeds.
+---
 
 ## Project Structure
 
 ```text
-SentinelCore/
-├── src/                          # Core agent and data pipeline
-│   ├── collector.py              # Main log collection and Kafka publisher (Run on Windows)
-│   ├── kafka_to_postgres.py      # Kafka → PostgreSQL consumer (Run in WSL/Linux)
-│   ├── analyze_logs.py           # Helper functions for log analysis
-│   └── enhanced_analyzer.py      # Advanced ML correlation framework
-├── tests/                        # End-to-end and live testing suite
-│   ├── test_e2e.py               # E2E unit tests
-│   ├── test_live_errors.py       # Live testing against real Windows Event Log
-│   └── validate_collector.py     # Pipeline dependency validator
-├── deploy/                       # Fully automated deployment tooling
-│   └── deploy_startup.ps1        # Registers agent as a SYSTEM service
-├── docs/                         # Documentation and Guides
-│   ├── LOCAL_TESTING_GUIDE.md    # Local testing and Kafka pipeline usage
-│   └── WSL_KAFKA_POSTGRES_SETUP.md  # WSL infrastructure setup
-├── config.json                   # Pipeline configuration and Kafka tuning parameters
-├── requirements.txt              # Standard Python dependencies
-└── README.md
+megahack-2026_HeisenBugs/
+├── src/
+│   ├── collector.py            # Windows agent — collects events, publishes to Kafka
+│   ├── kafka_to_postgres.py    # Kafka consumer → PostgreSQL writer (runs in WSL)
+│   ├── api_server.py           # FastAPI backend serving the dashboard (runs in WSL)
+│   ├── analyzer.py             # Offline event analyzer / report generator
+│   └── shared_constants.py     # Shared constants (LEVEL_NAMES, DB_CONFIG, thresholds)
+├── frontend/                   # React + Vite + Tailwind dashboard
+├── monitoring/
+│   ├── prometheus.yml          # Prometheus scrape config
+│   └── sentinel_dashboard.json # Grafana dashboard JSON (import this)
+├── tests/
+│   ├── test_e2e.py
+│   ├── test_live_errors.py
+│   └── validate_collector.py
+├── config.json                 # Kafka + agent runtime config
+├── requirements.txt            # Python dependencies
+└── deploy_startup.ps1          # Registers collector as a Windows Scheduled Task
 ```
 
-## Complete Project Setup Guide
+---
 
-**Requirements:** Windows 10/11, WSL (Ubuntu), Python 3.9+
+## ══════════════════════════════════════
+## FIRST-TIME SETUP GUIDE
+## ══════════════════════════════════════
 
-### Phase 1: WSL Infrastructure (Kafka & PostgreSQL)
+> **Prerequisites:** Windows 10/11, WSL2 with Ubuntu, Python 3.9+, Node.js 18+, Java 17+ (for Kafka)
 
-Before the Windows agent can run, the receiving pipeline must be online.
+---
 
-1. Install Kafka and PostgreSQL in WSL. Detailed steps are in [docs/WSL_KAFKA_POSTGRES_SETUP.md](docs/WSL_KAFKA_POSTGRES_SETUP.md).
-2. Configure `config.json` in the root directory on the Windows side. Ensure `bootstrap_servers` matches your WSL IP address:
-   ```json
-   {
-     "kafka": {
-       "bootstrap_servers": "172.30.178.75:9092",
-       "topic": "sentinel-events",
-       "client_id": "windows-test-agent",
-       "acks": "all",
-       "retries": 5,
-       "retry_backoff_ms": 3000,
-       "linger_ms": 50,
-       "request_timeout_ms": 15000
-     },
-     "agent": {
-       "system_id_mode": "AUTO",
-       "batch_size": 20,
-       "retry_attempts": 3,
-       "retry_backoff_seconds": 3
-     }
-   }
-   ```
+### PHASE 0 — Verify Prerequisites (Windows PowerShell)
 
-### Phase 2: Start the Consumer in WSL
+Open a **PowerShell** window (no admin required for this step) and verify:
 
-The consumer script (`src/kafka_to_postgres.py`) connects to Kafka, subscribes to the topic, and writes events to the PostgreSQL database.
+```powershell
+python --version    # Must be 3.9+
+node --version      # Must be 18+
+java --version      # Must be 17+ (required by Kafka)
+wsl --version       # Must show WSL 2
+```
 
-1. Open a WSL Ubuntu terminal.
-2. Install consumer dependencies:
-   ```bash
-   pip install kafka-python-ng psycopg2-binary
-   ```
-3. Run the consumer script:
-   ```bash
-   python3 src/kafka_to_postgres.py
-   ```
-4. Leave this running in the terminal. It uses exponential backoff to handle any temporary network interruptions automatically.
+If any are missing:
+- **Python**: https://python.org/downloads
+- **Node.js**: https://nodejs.org
+- **Java 17+**: https://adoptium.net
+- **WSL2**: `wsl --install` in PowerShell as Administrator, then restart
 
-### Phase 3: Start the Collector Agent on Windows
+---
 
-The collector script (`src/collector.py`) monitors Windows Event Logs, structures them, and pushes them to Kafka.
+### PHASE 1 — Install & Start Kafka 4.0.0 in WSL
 
-1. Open **PowerShell as Administrator**.
-2. Install producer dependencies:
-   ```powershell
-   pip install -r requirements.txt
-   ```
-3. Run the collector manually to verify data flow:
-   ```powershell
-   $env:SENTINEL_KAFKA_MODE = "true"
-   python src\collector.py
-   ```
-4. Watch the WSL terminal to confirm the consumer successfully inserts the events into PostgreSQL.
+**Open a WSL (Ubuntu) terminal.** This will be **WSL Terminal 1 — Kafka**.
 
-### Phase 4: Install as an Automated Background Service
+```bash
+# Download Kafka 4.0.0 with KRaft mode (no Zookeeper required)
+cd ~
+wget https://downloads.apache.org/kafka/4.0.0/kafka_2.13-4.0.0.tgz
+tar -xzf kafka_2.13-4.0.0.tgz
+mv kafka_2.13-4.0.0 kafka
 
-Once you verify the pipeline works perfectly, you can configure SentinelCore to run silently in the background every time Windows boots.
+# Move into the Kafka directory
+cd ~/kafka
 
-1. Open **PowerShell as Administrator**.
-2. Run the deployment script:
-   ```powershell
-   cd C:\path\to\SentinelCore
-   .\deploy\deploy_startup.ps1
-   ```
-   This script does the following:
+# Generate a cluster UUID (required for KRaft mode)
+KAFKA_CLUSTER_ID="$(bin/kafka-storage.sh random-uuid)"
 
-- Installs dependencies
-- Creates an isolated Python virtual environment (`.venv`)
-- Creates a Scheduled Task named `SentinelCore Agent` that elevates as the `SYSTEM` user
-- Runs invisibly on OS startup
+# Format the storage directory with the KRaft config
+bin/kafka-storage.sh format -t "$KAFKA_CLUSTER_ID" -c config/kraft/server.properties
 
-If you ever need to stop the background agent, simply delete the scheduled task or stop it from the Windows Task Scheduler GUI.
+# Start Kafka (keep this terminal open and running)
+bin/kafka-server-start.sh config/kraft/server.properties
+```
 
-## ML Target Schema
+> ✅ Kafka is now listening on **port 9092**. Keep this terminal open.
 
-The structured JSON payload is designed for direct ingestion into Machine Learning pipelines for predictive maintenance models:
+---
+
+### PHASE 2 — Create the Kafka Topic
+
+**Open a NEW WSL terminal** (WSL Terminal 2). Keep Terminal 1 running.
+
+```bash
+cd ~/kafka
+
+# Create the sentinel-events topic
+bin/kafka-topics.sh --create \
+  --topic sentinel-events \
+  --bootstrap-server localhost:9092 \
+  --partitions 3 \
+  --replication-factor 1
+
+# Verify the topic was created
+bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+# Expected output: sentinel-events
+```
+
+---
+
+### PHASE 3 — Install & Configure PostgreSQL in WSL
+
+**In WSL Terminal 2** (or any free WSL terminal):
+
+```bash
+# Install PostgreSQL
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+
+# Start the PostgreSQL service
+sudo service postgresql start
+
+# Create the database and user for SentinelCore
+sudo -u postgres psql <<EOF
+CREATE DATABASE sentinel_logs;
+CREATE USER sentinel_admin WITH PASSWORD 'changeme123';
+GRANT ALL PRIVILEGES ON DATABASE sentinel_logs TO sentinel_admin;
+ALTER DATABASE sentinel_logs OWNER TO sentinel_admin;
+EOF
+
+# Test the connection
+psql -h localhost -U sentinel_admin -d sentinel_logs -c "SELECT version();"
+```
+
+> ✅ PostgreSQL is running on **port 5432**. Tables are auto-created on first consumer run.
+
+---
+
+### PHASE 4 — Get Your WSL IP and Update config.json
+
+The WSL IP address changes on every Windows reboot. Get the current one:
+
+**In any WSL terminal:**
+
+```bash
+ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
+# Example output: 172.30.178.75
+```
+
+**On Windows**, open `C:\ProgramData\megahack-2026_HeisenBugs\config.json` and update `bootstrap_servers` with your WSL IP:
 
 ```json
 {
-  "system_id": "machine-guid",
-  "events": [
-    {
-      "fault_type": "DRIVER_ISSUE",
-      "severity": "WARNING",
-      "provider_name": "Microsoft-Windows-Kernel-PnP",
-      "event_id": 219,
-      "cpu_usage_percent": 45.2,
-      "memory_usage_percent": 88.1,
-      "disk_free_percent": 15.0,
-      "message": "Microsoft-Windows-Kernel-PnP Event 219 (WARNING) on channel System",
-      "created_at": "2026-02-27T01:30:00Z",
-      "diagnostic_context": {
-        "resource_alert": ["HIGH MEMORY"]
-      },
-      "raw_xml": "<Event>...</Event>"
-    }
-  ]
+  "kafka": {
+    "bootstrap_servers": "172.30.178.75:9092",
+    "topic": "sentinel-events",
+    "client_id": "windows-test-agent",
+    "acks": "all",
+    "retries": 5,
+    "retry_backoff_ms": 3000,
+    "linger_ms": 50,
+    "request_timeout_ms": 15000
+  },
+  "agent": {
+    "system_id_mode": "AUTO",
+    "batch_size": 100,
+    "retry_attempts": 3,
+    "retry_backoff_seconds": 3,
+    "save_local_copy": true
+  }
 }
 ```
+
+---
+
+### PHASE 5 — Start the Kafka → PostgreSQL Consumer
+
+**Open a NEW WSL terminal** (WSL Terminal 2 — Consumer):
+
+```bash
+# Navigate to the project
+cd /mnt/c/ProgramData/megahack-2026_HeisenBugs
+
+# Install dependencies
+pip install kafka-python-ng psycopg2-binary
+
+# Start the consumer (keep this terminal open)
+python3 src/kafka_to_postgres.py
+```
+
+> ✅ You should see: `Listening to Kafka topic 'sentinel-events' acting as syncing bridge...`  
+> Keep this terminal open. It inserts events + heartbeats into PostgreSQL automatically.
+
+---
+
+### PHASE 6 — Start the FastAPI Backend
+
+**Open a NEW WSL terminal** (WSL Terminal 3 — API):
+
+```bash
+cd /mnt/c/ProgramData/megahack-2026_HeisenBugs
+
+# Install FastAPI + Uvicorn
+pip install fastapi uvicorn psycopg2-binary
+
+# Start the API server (keep this terminal open)
+uvicorn src.api_server:app --host 0.0.0.0 --port 8080 --reload
+```
+
+> ✅ API is live at **http://localhost:8080**  
+> Verify it works: open http://localhost:8080/health in your browser — you should see `{"status":"healthy","database":"connected"}`
+
+---
+
+### PHASE 7 — Start the Collector Agent on Windows
+
+**Open a new PowerShell window as Administrator:**  
+(Right-click PowerShell → "Run as administrator")
+
+```powershell
+# Navigate to the project
+cd C:\ProgramData\megahack-2026_HeisenBugs
+
+# Install all Python dependencies
+pip install -r requirements.txt
+
+# Start the collector with Kafka mode enabled
+$env:SENTINEL_KAFKA_MODE = "true"
+python src\collector.py
+```
+
+> ✅ You should see `[Cycle 1]` start printing. Watch WSL Terminal 2 (consumer) to confirm events are being inserted into PostgreSQL.
+
+---
+
+### PHASE 8 — Start the React Frontend
+
+**Open a new PowerShell window** (normal user, no admin needed):
+
+```powershell
+cd C:\ProgramData\megahack-2026_HeisenBugs\frontend
+
+# Install Node.js dependencies (first time only — takes ~1 minute)
+npm install
+
+# Start the development server
+npm run dev
+```
+
+> ✅ Dashboard is live at **http://localhost:5173**  
+> The frontend talks to the FastAPI backend at port 8080.
+
+---
+
+### PHASE 9 — Set Up Prometheus
+
+**Open a NEW WSL terminal** (WSL Terminal 4 — Prometheus):
+
+```bash
+# Download Prometheus
+cd ~
+wget https://github.com/prometheus/prometheus/releases/download/v2.52.0/prometheus-2.52.0.linux-amd64.tar.gz
+tar -xzf prometheus-2.52.0.linux-amd64.tar.gz
+mv prometheus-2.52.0.linux-amd64 prometheus
+
+# Copy the project's pre-configured prometheus.yml
+cp /mnt/c/ProgramData/megahack-2026_HeisenBugs/monitoring/prometheus.yml ~/prometheus/prometheus.yml
+
+# Start Prometheus (keep this terminal open)
+cd ~/prometheus
+./prometheus --config.file=prometheus.yml
+```
+
+> ✅ Prometheus is running at **http://localhost:9090**  
+> It scrapes `/metrics-export` from the API server every **5 seconds** automatically.  
+> It also scrapes itself (port 9090) and node-exporter (port 9100) every 15 seconds.
+
+---
+
+### PHASE 10 — Set Up Grafana
+
+**Open a NEW WSL terminal** (WSL Terminal 5 — Grafana):
+
+```bash
+# Install Grafana
+sudo apt install -y apt-transport-https software-properties-common
+wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
+echo "deb https://packages.grafana.com/oss/deb stable main" | sudo tee /etc/apt/sources.list.d/grafana.list
+sudo apt update
+sudo apt install -y grafana
+
+# Start Grafana
+sudo service grafana-server start
+```
+
+**Now import the SentinelCore dashboard:**
+
+1. Open **http://localhost:3000** in your browser
+2. Login with **admin / admin** (you'll be prompted to change it)
+3. In the left sidebar, go to **Connections → Data Sources**
+4. Click **Add data source** → choose **Prometheus**
+5. Set URL to `http://localhost:9090` and click **Save & Test**
+6. In the left sidebar, go to **Dashboards → Import**
+7. Click **Upload JSON file** and select:  
+   `C:\ProgramData\megahack-2026_HeisenBugs\monitoring\sentinel_dashboard.json`
+8. Select your Prometheus data source and click **Import**
+
+> ✅ Grafana is live at **http://localhost:3000** with the SentinelCore dashboard loaded.
+
+---
+
+### PHASE 11 — Register Collector as a Windows Service (Optional but Recommended)
+
+Once you confirm the full pipeline is working, register the collector to start automatically on every Windows boot:
+
+**PowerShell as Administrator:**
+
+```powershell
+cd C:\ProgramData\megahack-2026_HeisenBugs
+.\deploy_startup.ps1
+```
+
+This script:
+- Installs all Python dependencies
+- Runs the validation suite
+- Registers a Windows Scheduled Task named **`SentinelCore`** that:
+  - Runs at system startup under the `SYSTEM` account (highest privileges)
+  - Auto-restarts up to 3 times on failure (1-minute cooldown)
+  - Runs indefinitely (no time limit)
+
+Useful task management commands:
+
+```powershell
+# Check if it's running
+Get-ScheduledTask -TaskName "SentinelCore" | Select-Object State
+
+# Start manually
+Start-ScheduledTask -TaskName "SentinelCore"
+
+# Stop it
+Stop-ScheduledTask -TaskName "SentinelCore"
+
+# View live logs
+Get-Content C:\ProgramData\megahack-2026_HeisenBugs\src\sentinel.log -Tail 50 -Wait
+
+# Uninstall / remove the task
+Unregister-ScheduledTask -TaskName "SentinelCore" -Confirm:$false
+```
+
+---
+
+## ══════════════════════════════════════
+## RESTART GUIDE (After First-Time Setup)
+## ══════════════════════════════════════
+
+After the first-time setup is complete, bring the full stack back up in this order after any reboot or shutdown. Each step needs its own terminal.
+
+> ⚠️ **Important:** Your WSL IP changes on every reboot. Always check it and update `config.json` if needed (Step 0 below).
+
+---
+
+### Step 0 — Check WSL IP (if Kafka isn't connecting)
+
+**WSL terminal:**
+
+```bash
+ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
+```
+
+If different from `config.json`, update it before starting the collector.
+
+---
+
+### Step 1 — Start PostgreSQL (WSL Terminal 1)
+
+```bash
+sudo service postgresql start
+
+# Quick sanity check
+psql -h localhost -U sentinel_admin -d sentinel_logs -c "SELECT COUNT(*) FROM events;"
+```
+
+---
+
+### Step 2 — Start Kafka (WSL Terminal 2)
+
+```bash
+cd ~/kafka
+bin/kafka-server-start.sh config/kraft/server.properties
+```
+
+> Keep this terminal open and running.
+
+---
+
+### Step 3 — Start the Kafka Consumer (WSL Terminal 3)
+
+```bash
+cd /mnt/c/ProgramData/megahack-2026_HeisenBugs
+python3 src/kafka_to_postgres.py
+```
+
+> Keep this terminal open.
+
+---
+
+### Step 4 — Start the API Server (WSL Terminal 4)
+
+```bash
+cd /mnt/c/ProgramData/megahack-2026_HeisenBugs
+uvicorn src.api_server:app --host 0.0.0.0 --port 8080 --reload
+```
+
+> Keep this terminal open.
+
+---
+
+### Step 5 — Start the Collector Agent (Windows — PowerShell as Administrator)
+
+> **Skip if you registered the Windows Scheduled Task** in Phase 11 — it starts automatically on boot.
+
+```powershell
+cd C:\ProgramData\megahack-2026_HeisenBugs
+$env:SENTINEL_KAFKA_MODE = "true"
+python src\collector.py
+```
+
+---
+
+### Step 6 — Start the Frontend (Windows — PowerShell)
+
+```powershell
+cd C:\ProgramData\megahack-2026_HeisenBugs\frontend
+npm run dev
+```
+
+> Dashboard: **http://localhost:5173**
+
+---
+
+### Step 7 — Start Prometheus (WSL Terminal 5)
+
+```bash
+cd ~/prometheus
+./prometheus --config.file=prometheus.yml
+```
+
+> Prometheus UI: **http://localhost:9090**
+
+---
+
+### Step 8 — Start Grafana (WSL Terminal 6)
+
+```bash
+sudo service grafana-server start
+```
+
+> Grafana: **http://localhost:3000** (admin / your-password)
+
+---
+
+## Quick Reference: All URLs & Ports
+
+| Service | Port | URL |
+|---------|------|-----|
+| Kafka Broker | 9092 | — |
+| PostgreSQL | 5432 | — |
+| FastAPI Backend | 8080 | http://localhost:8080 |
+| API Health Check | 8080 | http://localhost:8080/health |
+| API Docs (Swagger) | 8080 | http://localhost:8080/docs |
+| React Dashboard | 5173 | http://localhost:5173 |
+| Prometheus | 9090 | http://localhost:9090 |
+| Grafana | 3000 | http://localhost:3000 |
+
+---
+
+## API Endpoint Reference
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Database connectivity check |
+| `GET /events?limit=100` | Recent telemetry events |
+| `GET /systems` | Live system status + heartbeats |
+| `GET /alerts` | CRITICAL/ERROR/WARNING alerts |
+| `GET /metrics` | Time-bucketed event counts (for charts) |
+| `GET /dashboard-metrics` | KPI summary card data |
+| `GET /fault-distribution` | Fault type breakdown |
+| `GET /severity-distribution` | Severity pie chart data |
+| `GET /pipeline-health` | Live pipeline throughput + latency |
+| `GET /system-metrics` | Avg CPU/memory/disk across all events |
+| `GET /metrics-export` | Prometheus-compatible text metrics |
+
+---
+
+## Troubleshooting
+
+### Kafka won't connect from Windows collector
+```bash
+# WSL IP changes on reboot — get the new one:
+ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
+# Update bootstrap_servers in config.json with the new IP
+```
+
+### collector.py exits immediately with "Another instance running"
+```powershell
+# Delete the stale PID lock file
+Remove-Item C:\ProgramData\megahack-2026_HeisenBugs\src\sentinel.pid -Force
+# Then retry
+```
+
+### API server returns 503 "Database unavailable"
+```bash
+# PostgreSQL is probably not running
+sudo service postgresql status
+sudo service postgresql start
+```
+
+### Frontend shows no data / blank charts
+```bash
+# Check the API server is running
+curl http://localhost:8080/health
+# Check browser DevTools console for CORS or network errors
+```
+
+### PostgreSQL tables don't exist error
+```
+# Tables (events, system_heartbeats) are auto-created when
+# kafka_to_postgres.py starts and receives its first message.
+# Make sure the consumer ran at least once successfully.
+```
+
+### Prometheus shows "Target down" for sentinelcore
+```bash
+# The API server must be running on port 8080
+# Verify: curl http://localhost:8080/metrics-export
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SENTINEL_KAFKA_MODE` | `true` | Use Kafka pipeline (recommended) |
+| `SENTINEL_LOCAL_MODE` | `false` | Write to local JSON file instead |
+| `KAFKA_BOOTSTRAP` | from `config.json` | Override Kafka broker address |
+| `SENTINEL_SERVER_URL` | `https://your-server.com/...` | HTTPS fallback endpoint |
+| `SENTINEL_AUTH_TOKEN` | *(none)* | Bearer token for HTTPS mode |
+
+---
 
 ## License
 

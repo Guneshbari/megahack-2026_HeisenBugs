@@ -54,6 +54,8 @@ try:
 except ImportError:
     HAS_KAFKA = False
 
+from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
+
 # ============================================================================
 # CONSTANTS
 # ============================================================================
@@ -63,13 +65,6 @@ AGENT_VERSION = "2.1.0"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 CONFIG_FILE = os.path.join(PROJECT_ROOT, "config.json")
-
-LEVEL_NAMES = {1: 'CRITICAL', 2: 'ERROR', 3: 'WARNING', 4: 'INFO', 5: 'VERBOSE'}
-
-# Resource alert thresholds
-CPU_ALERT_THRESHOLD    = 90   # percent
-MEMORY_ALERT_THRESHOLD = 90   # percent
-DISK_LOW_THRESHOLD     = 10   # percent free
 
 # ============================================================================
 # CONFIGURATION
@@ -390,7 +385,6 @@ def get_uptime_seconds() -> int:
 
 
 def get_local_ip() -> str:
-    import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -951,7 +945,10 @@ def run_collector():
                     'ip_address': ip_address,
                     'agent_version': AGENT_VERSION,
                     'os_version': os_version,
-                    'uptime_seconds': uptime
+                    'uptime_seconds': uptime,
+                    'cpu_usage_percent': resources.get('cpu_usage_percent', 0.0),
+                    'memory_usage_percent': resources.get('memory_usage_percent', 0.0),
+                    'disk_free_percent': resources.get('disk_free_percent', 100.0)
                 },
                 'events':              batch_events
             }

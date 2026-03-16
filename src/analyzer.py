@@ -20,18 +20,13 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
+from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
+
 # ============================================================================
 # CONSTANTS
 # ============================================================================
 
 ANALYZER_VERSION = "2.0.0"
-
-LEVEL_NAMES = {1: 'CRITICAL', 2: 'ERROR', 3: 'WARNING', 4: 'INFO', 5: 'VERBOSE'}
-
-# Resource alert thresholds (match collector.py)
-CPU_ALERT_THRESHOLD    = 90   # percent
-MEMORY_ALERT_THRESHOLD = 90   # percent
-DISK_LOW_THRESHOLD     = 10   # percent free
 
 # ============================================================================
 # UNIFIED KNOWLEDGE BASE
@@ -184,15 +179,7 @@ KNOWLEDGE_BASE: Dict[Tuple, Dict] = {
         ],
     },
 
-    ('Microsoft-Windows-DistributedCOM', 10016): {
-        'title':       'DCOM Activation Permission Denied',
-        'diagnosis':   'App-specific permission settings do not grant COM activation rights.',
-        'causes': ['Default DCOM permissions restrict certain apps'],
-        'solutions': [
-            'Usually benign — safe to ignore',
-            'Use dcomcnfg to adjust permissions if blocking functionality',
-        ],
-    },
+
 
     ('Microsoft-Windows-WindowsUpdateClient', 20): {
         'title':       'Windows Update Installation Failure',

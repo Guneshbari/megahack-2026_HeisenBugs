@@ -8,18 +8,13 @@ from kafka import KafkaConsumer # type: ignore
 import psycopg2
 from psycopg2.extras import Json
 
+from shared_constants import DB_CONFIG
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger('kafka_to_postgres')
 
-# Database connection
-DB_CONFIG = {
-    "dbname": "sentinel_logs",
-    "user": "sentinel_admin",
-    "password": "changeme123",
-    "host": "localhost",
-    "port": 5432,
-}
+# DB_CONFIG imported from shared_constants
 
 # Kafka configuration
 KAFKA_BOOTSTRAP_SERVERS = 'localhost:9092'
