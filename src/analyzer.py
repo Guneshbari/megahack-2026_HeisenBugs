@@ -22,6 +22,8 @@ from typing import List, Dict, Optional, Tuple
 
 from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
 
+from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
+
 # ============================================================================
 # CONSTANTS
 # ============================================================================
@@ -178,6 +180,7 @@ KNOWLEDGE_BASE: Dict[Tuple, Dict] = {
             'Consider increasing available memory',
         ],
     },
+
 
 
 
