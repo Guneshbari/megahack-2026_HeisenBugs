@@ -22,8 +22,6 @@ from typing import List, Dict, Optional, Tuple
 
 from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
 
-from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
-
 # ============================================================================
 # CONSTANTS
 # ============================================================================
@@ -183,7 +181,6 @@ KNOWLEDGE_BASE: Dict[Tuple, Dict] = {
 
 
 
-
     ('Microsoft-Windows-WindowsUpdateClient', 20): {
         'title':       'Windows Update Installation Failure',
         'diagnosis':   'A Windows Update installation failed.',
@@ -310,8 +307,63 @@ def load_events(filename: str) -> Dict:
 # ANALYSIS FUNCTIONS
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# KEYWORD-BASED FALLBACK CLASSIFIER
+# Used when an event is not found in KNOWLEDGE_BASE.
+# ---------------------------------------------------------------------------
+
+_KEYWORD_RULES: List[Tuple] = [
+    # (keyword_in_provider_or_message, fault_subtype, title)
+    ('crash',        'CRASH',           'Application Crash'),
+    ('hang',         'HANG',            'Application Hang'),
+    ('timeout',      'TIMEOUT',         'Operation Timeout'),
+    ('fail',         'FAILURE',         'General Failure'),
+    ('error',        'ERROR',           'Reported Error'),
+    ('exception',    'EXCEPTION',       'Unhandled Exception'),
+    ('disk',         'STORAGE',         'Disk-Related Event'),
+    ('memory',       'MEMORY',          'Memory-Related Event'),
+    ('driver',       'DRIVER',          'Driver-Related Event'),
+    ('service',      'SERVICE',         'Service-Related Event'),
+    ('network',      'NETWORK',         'Network-Related Event'),
+    ('security',     'SECURITY',        'Security-Related Event'),
+    ('update',       'UPDATE',          'Update-Related Event'),
+    ('power',        'POWER',           'Power-Related Event'),
+]
+
+
+def classify_unknown_event(provider: str, message: str, event_id: int) -> Dict:
+    """
+    Keyword-based fallback for events not in KNOWLEDGE_BASE.
+    confidence_score: 0.5 on keyword match, 0.2 on total fallback.
+    """
+    combined = f"{provider} {message}".lower()
+    for kw, subtype, title in _KEYWORD_RULES:
+        if kw in combined:
+            return {
+                'title':            title,
+                'diagnosis':        f"Keyword match '{kw}' in provider/message.",
+                'fault_subtype':    subtype,
+                'confidence_score': 0.5,
+                'causes':           [],
+                'solutions':        ['Check Event Viewer for details'],
+            }
+    return {
+        'title':            f'Unknown Event {event_id}',
+        'diagnosis':        f'No classification available for {provider} EventID {event_id}.',
+        'fault_subtype':    'UNKNOWN',
+        'confidence_score': 0.2,
+        'causes':           [],
+        'solutions':        ['Check Event Viewer for details'],
+    }
+
+
 def detect_errors(events: List[Dict]) -> List[Dict]:
-    """Classify error/warning events and attach knowledge base entries."""
+    """
+    Classify error/warning events.
+    - Uses KNOWLEDGE_BASE as primary (confidence 0.9)
+    - Falls back to keyword classifier (confidence 0.5) or total fallback (0.2)
+    - Calls extract_event_description() to surface human-readable text
+    """
     detected = []
     for ev in events:
         level = ev.get('level', 4)
@@ -322,6 +374,27 @@ def detect_errors(events: List[Dict]) -> List[Dict]:
         event_id = ev.get('event_id') or 0
         kb       = lookup_knowledge(provider, event_id)
 
+        # Extract human-readable description from raw XML
+        description = extract_event_description(ev.get('raw_xml', '')) or ''
+
+        if kb:
+            title            = kb['title']
+            diagnosis        = kb['diagnosis']
+            causes           = kb.get('causes', [])
+            solutions        = kb.get('solutions', ['Check Event Viewer for details'])
+            fault_subtype    = kb.get('fault_subtype', kb.get('fault_type', 'KNOWN'))
+            confidence_score = 0.9
+            known            = True
+        else:
+            fallback = classify_unknown_event(provider, description, event_id)
+            title            = fallback['title']
+            diagnosis        = fallback['diagnosis']
+            causes           = fallback['causes']
+            solutions        = fallback['solutions']
+            fault_subtype    = fallback['fault_subtype']
+            confidence_score = fallback['confidence_score']
+            known            = False
+
         detected.append({
             'event_record_id': ev.get('event_record_id', 0),
             'provider_name':   provider,
@@ -331,14 +404,17 @@ def detect_errors(events: List[Dict]) -> List[Dict]:
             'event_time':      ev.get('event_time', 'Unknown'),
             'log_channel':     ev.get('log_channel', 'Unknown'),
             'fault_type':      ev.get('fault_type', 'UNKNOWN'),
+            'fault_subtype':   fault_subtype,
+            'confidence_score': confidence_score,
             'cpu_at_time':     ev.get('cpu_usage_percent', 0),
             'memory_at_time':  ev.get('memory_usage_percent', 0),
             'disk_at_time':    ev.get('disk_free_percent', 0),
-            'known':           kb is not None,
-            'title':           kb['title']     if kb else f'{provider} Event {event_id}',
-            'diagnosis':       kb['diagnosis'] if kb else f'Unrecognized event from {provider}',
-            'causes':          kb.get('causes',    []) if kb else [],
-            'solutions':       kb.get('solutions', []) if kb else ['Check Event Viewer for details'],
+            'known':           known,
+            'title':           title,
+            'diagnosis':       diagnosis,
+            'description':     description,
+            'causes':          causes,
+            'solutions':       solutions,
         })
 
     return detected

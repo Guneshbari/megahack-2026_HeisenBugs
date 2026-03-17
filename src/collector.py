@@ -54,7 +54,26 @@ try:
 except ImportError:
     HAS_KAFKA = False
 
-from shared_constants import LEVEL_NAMES, CPU_ALERT_THRESHOLD, MEMORY_ALERT_THRESHOLD, DISK_LOW_THRESHOLD
+from shared_constants import (
+    LEVEL_NAMES,
+    CPU_ALERT_THRESHOLD,
+    MEMORY_ALERT_THRESHOLD,
+    DISK_LOW_THRESHOLD,
+    RETRY_MAX_ATTEMPTS as _SC_RETRY_MAX,
+    RETRY_BACKOFF_SECONDS as _SC_RETRY_BACKOFF,
+    CIRCUIT_BREAKER_THRESHOLD,
+    CIRCUIT_BREAKER_RESET_SECS,
+)
+from sentinel_utils import (
+    retry_with_backoff,
+    timeout_wrapper,
+    CircuitBreaker,
+    clean_message,
+    make_db_connection,
+    structured_log,
+)
+_clean_message = clean_message  # backward-compat alias
+
 
 # ============================================================================
 # CONSTANTS
@@ -170,9 +189,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('SentinelCore')
 
-# ============================================================================
-# PID LOCK
-# ============================================================================
 
 def acquire_pid_lock() -> bool:
     if os.path.exists(PID_LOCK_FILE):
@@ -437,6 +453,7 @@ def extract_event_metadata(xml: str) -> Optional[Dict]:
             'process_id':      int(find(r'ProcessID["\']?>(\d+)<', '0')),
             'thread_id':       int(find(r'ThreadID["\']?>(\d+)<', '0')),
             'event_time':      find(r'SystemTime=["\']([^"\']+)["\']', datetime.now(timezone.utc).isoformat()),
+            'event_message':   find(r'<Message>(.*?)</Message>', ''),
         }
     except Exception as e:
         print(f"Warning: Could not parse event metadata: {e}", file=sys.stderr)
@@ -552,6 +569,9 @@ class LocalFileManager:
 # KAFKA MANAGER
 # ============================================================================
 
+# Module-level circuit breaker for Kafka
+_kafka_cb = CircuitBreaker(label='Kafka')
+
 class KafkaManager:
     def __init__(self, bootstrap_servers: str, topic: str):
         if not HAS_KAFKA:
@@ -611,7 +631,15 @@ class KafkaManager:
 
     def send_batch(self, payload: Dict) -> Dict:
         result = {'sent': 0, 'failed': 0, 'success': False}
+
+        # Circuit breaker guard
+        if not _kafka_cb.allow():
+            logger.warning("[KafkaManager.send_batch] Circuit OPEN — skipping send")
+            result['failed'] = len(payload.get('events', []))
+            return result
+
         if not self._ensure_connected():
+            _kafka_cb.record_failure()
             result['failed'] = len(payload.get('events', []))
             return result
 
@@ -626,22 +654,36 @@ class KafkaManager:
                 'system_info':         payload.get('system_info', {}),
                 'event':               event
             }
-            try:
-                futures.append((event, self.producer.send(self.topic, key=system_id, value=msg)))
-            except Exception as e:
-                result['failed'] += 1
-                logger.error(f"Send error: {e}")
 
-        # Confirm all at once
-        for event, future in futures:
-            try:
-                future.get(timeout=30)
-                result['sent'] += 1
-            except (KafkaError, Exception) as e:
+            def _send_one(m=msg):
+                return self.producer.send(self.topic, key=system_id, value=m)
+
+            future_result, ok = retry_with_backoff(
+                _send_one,
+                max_attempts=_SC_RETRY_MAX,
+                label=f"kafka_send/{event.get('event_hash','?')[:12]}"
+            )
+            if ok and future_result is not None:
+                futures.append((event, future_result))
+            else:
                 result['failed'] += 1
-                logger.error(f"Delivery failed for {event.get('event_hash','?')[:12]}: {e}")
+
+        # Confirm all futures with a per-future timeout
+        for event, future in futures:
+            def _get_future(f=future):
+                return f.get(timeout=10)
+
+            _, ok = timeout_wrapper(_get_future, timeout_secs=12.0,
+                                    label=f"kafka_future/{event.get('event_hash','?')[:12]}")
+            if ok:
+                result['sent'] += 1
+                _kafka_cb.record_success()
+            else:
+                result['failed'] += 1
+                _kafka_cb.record_failure()
+                logger.error(f"Delivery timeout for {event.get('event_hash','?')[:12]}")
                 try:
-                    self.producer.flush(timeout=30)
+                    self.producer.flush(timeout=5)
                 except Exception:
                     pass
 
@@ -834,6 +876,7 @@ def collect_events_from_channel(channel: str, last_record_id: int) -> List[Dict]
 # MAIN COLLECTOR
 # ============================================================================
 
+
 def run_collector():
     print(f"SentinelCore v{COLLECTOR_VERSION}")
     print("=" * 70)
@@ -847,11 +890,11 @@ def run_collector():
     for w in warnings:
         print(f"  ⚠ {w}")
 
-    system_id      = get_system_id()
-    hostname       = get_hostname()
-    boot_session   = get_boot_session_id()
-    os_version     = get_os_version()
-    ip_address     = get_local_ip()
+    system_id    = get_system_id()
+    hostname     = get_hostname()
+    boot_session = get_boot_session_id()
+    os_version   = get_os_version()
+    ip_address   = get_local_ip()
 
     print(f"\nSystem:   {system_id}  ({hostname})")
     print(f"OS:       {os_version}")
@@ -869,120 +912,193 @@ def run_collector():
     print("\nStarting collection... (Ctrl+C to stop)\n")
 
     cycle_count = 0
+    _shutdown   = False
 
-    try:
-        while True:
-            cycle_count += 1
-            cycle_start = time.time()
-            print(f"[Cycle {cycle_count}] {datetime.now(timezone.utc).isoformat()}")
+    import signal as _signal
 
+    def _handle_signal(signum, frame):
+        nonlocal _shutdown
+        logger.info(f"[graceful_shutdown] Signal {signum} received — draining and stopping")
+        _shutdown = True
+
+    _signal.signal(_signal.SIGTERM, _handle_signal)
+
+    while not _shutdown:
+        cycle_count += 1
+        cycle_start  = time.time()
+        cycle_status = "ok"
+        events_sent  = 0
+        pending_checkpoints: Dict[str, int] = {}
+
+        logger.info(f"[Cycle {cycle_count}] start  ts={datetime.now(timezone.utc).isoformat()}")
+
+        try:
             if not check_disk_space():
-                time.sleep(COLLECTION_INTERVAL_SECONDS)
-                continue
+                cycle_status = "disk_skip"
+                logger.warning(f"[Cycle {cycle_count}] skipped — low disk space")
+            else:
+                # ── One resource snapshot per cycle, NOT per event ─────────────
+                resources = get_resource_snapshot()
 
-            # ── Resource snapshot once per cycle (NOT per event) ──────────
-            resources = get_resource_snapshot()
+                batch_events:       List[Dict] = []
+                channel_raw_events: Dict       = {}
 
-            pending_checkpoints: Dict[str, int] = {}
-            batch_events = []
-            channel_raw_events = {}
+                for channel in TARGET_LOGS:
+                    try:
+                        raw_events = collect_events_from_channel(
+                            channel, checkpoint_mgr.get(channel)
+                        )
+                        if raw_events:
+                            logger.info(f"  {channel}: {len(raw_events)} new event(s)")
+                    except Exception as ch_exc:
+                        logger.error(f"  Channel {channel} error: {ch_exc}")
+                        raw_events = []
 
-            for channel in TARGET_LOGS:
-                raw_events = collect_events_from_channel(channel, checkpoint_mgr.get(channel))
-                if raw_events:
-                    print(f"  {channel}: {len(raw_events)} new event(s)")
+                    for ev in raw_events:
+                        try:
+                            h = generate_event_hash(
+                                ev['raw_xml'], system_id,
+                                ev['metadata']['event_record_id']
+                            )
+                            if h in seen_hashes:
+                                continue
+                            seen_hashes.append(h)
 
-                for ev in raw_events:
-                    h = generate_event_hash(ev['raw_xml'], system_id, ev['metadata']['event_record_id'])
-                    if h in seen_hashes:
-                        continue
-                    seen_hashes.append(h)
+                            fault   = classify_event(
+                                ev['metadata']['provider_name'],
+                                ev['metadata']['event_id'],
+                                ev['metadata']['level']
+                            )
+                            diag    = build_diagnostic_context(resources)
+                            level   = ev['metadata']['level']
+                            raw_msg = ev['metadata'].get('event_message', '')
 
-                    fault      = classify_event(ev['metadata']['provider_name'], ev['metadata']['event_id'], ev['metadata']['level'])
-                    diag       = build_diagnostic_context(resources)
-                    level      = ev['metadata']['level']
+                            batch_events.append({
+                                'log_channel':          ev['log_channel'],
+                                'event_record_id':      ev['metadata']['event_record_id'],
+                                'provider_name':        ev['metadata']['provider_name'],
+                                'event_id':             ev['metadata']['event_id'],
+                                'level':                level,
+                                'task':                 ev['metadata']['task'],
+                                'opcode':               ev['metadata']['opcode'],
+                                'keywords':             ev['metadata']['keywords'],
+                                'process_id':           ev['metadata']['process_id'],
+                                'thread_id':            ev['metadata']['thread_id'],
+                                'event_time':           ev['metadata']['event_time'],
+                                'cpu_usage_percent':    resources['cpu_usage_percent'],
+                                'memory_usage_percent': resources['memory_usage_percent'],
+                                'disk_free_percent':    resources['disk_free_percent'],
+                                'event_hash':           h,
+                                'fault_type':           fault['fault_type'],
+                                'fault_description':    fault['fault_description'],
+                                'severity':             fault['severity'],
+                                'message': (
+                                    f"{ev['metadata']['provider_name']} Event "
+                                    f"{ev['metadata']['event_id']} ({fault['severity']})"
+                                    f" on {ev['log_channel']}"
+                                ),
+                                'created_at':         datetime.now(timezone.utc).isoformat(),
+                                'diagnostic_context': diag,
+                                'raw_xml':            ev['raw_xml'],
+                                # ── ML enrichment: lightweight, no heavy parsing ──────
+                                'event_message':      raw_msg,
+                                'parsed_message':     _clean_message(raw_msg),
+                                'normalized_message': _clean_message(raw_msg).lower(),
+                            })
+                        except Exception as ev_exc:
+                            logger.error(f"  Event process error: {ev_exc}")
+                            continue
 
-                    batch_events.append({
-                        'log_channel':          ev['log_channel'],
-                        'event_record_id':      ev['metadata']['event_record_id'],
-                        'provider_name':        ev['metadata']['provider_name'],
-                        'event_id':             ev['metadata']['event_id'],
-                        'level':                level,
-                        'task':                 ev['metadata']['task'],
-                        'opcode':               ev['metadata']['opcode'],
-                        'keywords':             ev['metadata']['keywords'],
-                        'process_id':           ev['metadata']['process_id'],
-                        'thread_id':            ev['metadata']['thread_id'],
-                        'event_time':           ev['metadata']['event_time'],
-                        'cpu_usage_percent':    resources['cpu_usage_percent'],
-                        'memory_usage_percent': resources['memory_usage_percent'],
-                        'disk_free_percent':    resources['disk_free_percent'],
-                        'event_hash':           h,
-                        'fault_type':           fault['fault_type'],
-                        'fault_description':    fault['fault_description'],
-                        'severity':             fault['severity'],
-                        'message':              f"{ev['metadata']['provider_name']} Event {ev['metadata']['event_id']} ({fault['severity']}) on {ev['log_channel']}",
-                        'created_at':           datetime.now(timezone.utc).isoformat(),
-                        'diagnostic_context':   diag,
-                        'raw_xml':              ev['raw_xml']
-                    })
+                    channel_raw_events[channel] = raw_events
 
-                channel_raw_events[channel] = raw_events
+                # ── Unified payload for the whole cycle ────────────────────────
+                uptime = get_uptime_seconds()
+                payload = {
+                    'system_id':           system_id,
+                    'hostname':            hostname,
+                    'boot_session_id':     boot_session,
+                    'os_version':          os_version,
+                    'uptime_seconds':      uptime,
+                    'collector_version':   COLLECTOR_VERSION,
+                    'timestamp_collected': datetime.now(timezone.utc).isoformat(),
+                    'system_info': {
+                        'system_id':            system_id,
+                        'hostname':             hostname,
+                        'ip_address':           ip_address,
+                        'agent_version':        AGENT_VERSION,
+                        'os_version':           os_version,
+                        'uptime_seconds':       uptime,
+                        'cpu_usage_percent':    resources.get('cpu_usage_percent', 0.0),
+                        'memory_usage_percent': resources.get('memory_usage_percent', 0.0),
+                        'disk_free_percent':    resources.get('disk_free_percent', 100.0),
+                    },
+                    'events': batch_events,
+                }
 
-            # ── Construct unified payload for the whole cycle ──────────
-            uptime = get_uptime_seconds()
-            payload = {
-                'system_id':           system_id,
-                'hostname':            hostname,
-                'boot_session_id':     boot_session,
-                'os_version':          os_version,
-                'uptime_seconds':      uptime,
-                'collector_version':   COLLECTOR_VERSION,
-                'timestamp_collected': datetime.now(timezone.utc).isoformat(),
-                'system_info': {
-                    'system_id': system_id,
-                    'hostname': hostname,
-                    'ip_address': ip_address,
-                    'agent_version': AGENT_VERSION,
-                    'os_version': os_version,
-                    'uptime_seconds': uptime,
-                    'cpu_usage_percent': resources.get('cpu_usage_percent', 0.0),
-                    'memory_usage_percent': resources.get('memory_usage_percent', 0.0),
-                    'disk_free_percent': resources.get('disk_free_percent', 100.0)
-                },
-                'events':              batch_events
-            }
+                if strategy.send(payload):
+                    events_sent = len(batch_events)
+                    for channel, raw_events in channel_raw_events.items():
+                        if raw_events:
+                            pending_checkpoints[channel] = max(
+                                e['metadata']['event_record_id'] for e in raw_events
+                            )
+                else:
+                    cycle_status = "send_failed"
 
-            if strategy.send(payload):
-                for channel, raw_events in channel_raw_events.items():
-                    if raw_events:
-                        pending_checkpoints[channel] = max(e['metadata']['event_record_id'] for e in raw_events)
+        except KeyboardInterrupt:
+            logger.info("\n[graceful_shutdown] KeyboardInterrupt — stopping after checkpoint save")
+            _shutdown = True
 
-            # ── Save checkpoint once per cycle (NOT per channel) ──────────
+        except Exception as cycle_exc:
+            # Per-cycle guard: log and CONTINUE — agent must never crash
+            logger.error(f"[Cycle {cycle_count}] unhandled error: {cycle_exc}", exc_info=True)
+            cycle_status = "error"
+
+        finally:
+            # ── Checkpoint always saved, even on error ─────────────────────
             if pending_checkpoints:
                 for ch, rid in pending_checkpoints.items():
                     checkpoint_mgr.update(ch, rid)
-                checkpoint_mgr.save()
+                try:
+                    checkpoint_mgr.save()
+                except Exception as ck_exc:
+                    logger.error(f"Checkpoint save failed: {ck_exc}")
 
-            print(f"Cycle done in {time.time() - cycle_start:.2f}s\n")
-            sleep_time = max(0, COLLECTION_INTERVAL_SECONDS - (time.time() - cycle_start))
-            if sleep_time:
+            duration = time.time() - cycle_start
+
+            # ── Watchdog: warn if cycle exceeded 2× expected interval ──────
+            if duration > COLLECTION_INTERVAL_SECONDS * 2:
+                logger.warning(
+                    f"[WATCHDOG] Cycle {cycle_count} took {duration:.1f}s "
+                    f"(threshold: {COLLECTION_INTERVAL_SECONDS * 2}s)"
+                )
+
+            # ── Structured cycle log ───────────────────────────────────────
+            structured_log_cycle(
+                cycle=cycle_count,
+                duration=duration,
+                events_sent=events_sent,
+                status=cycle_status,
+                extras={"hostname": hostname, "system_id": system_id},
+            )
+
+            sleep_time = max(0, COLLECTION_INTERVAL_SECONDS - duration)
+            if sleep_time and not _shutdown:
                 time.sleep(sleep_time)
 
-    except KeyboardInterrupt:
-        print("\nShutting down gracefully...")
+    # ── Graceful shutdown sequence ─────────────────────────────────────────
+    logger.info("[graceful_shutdown] Flushing final state...")
+    try:
         checkpoint_mgr.save()
+    except Exception:
+        pass
+    try:
         strategy.close()
-        release_pid_lock()
-        print(f"Checkpoints saved. Cycles completed: {cycle_count}")
-        sys.exit(0)
-
-    except Exception as e:
-        print(f"\nFatal error: {e}", file=sys.stderr)
-        checkpoint_mgr.save()
-        strategy.close()
-        release_pid_lock()
-        sys.exit(1)
+    except Exception:
+        pass
+    release_pid_lock()
+    logger.info(f"[graceful_shutdown] Clean exit. Cycles completed: {cycle_count}")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
