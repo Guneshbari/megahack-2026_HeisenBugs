@@ -25,5 +25,3 @@ export default function SeverityBadge({ severity, size = 'sm' }: SeverityBadgePr
     </span>
   );
 }
-
-export { severityConfig };

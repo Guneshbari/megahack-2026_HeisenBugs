@@ -12,6 +12,27 @@ type SortKey = 'event_time' | 'severity' | 'system_id' | 'fault_type';
 type SortDir = 'asc' | 'desc';
 const severityOrder: Record<Severity, number> = { CRITICAL: 0, ERROR: 1, WARNING: 2, INFO: 3 };
 
+interface SortHeaderProps {
+  readonly label: string;
+  readonly sortId: SortKey;
+  readonly activeSortKey: SortKey;
+  readonly onToggleSort: (sortKey: SortKey) => void;
+}
+
+function SortHeader({ label, sortId, activeSortKey, onToggleSort }: SortHeaderProps) {
+  return (
+    <th
+      onClick={() => onToggleSort(sortId)}
+      className="text-left text-[10px] font-semibold text-text-muted uppercase tracking-wider py-3 px-3 cursor-pointer hover:text-text-secondary transition-colors select-none"
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ArrowUpDown className={`w-3 h-3 ${activeSortKey === sortId ? 'text-signal-primary' : 'opacity-30'}`} />
+      </span>
+    </th>
+  );
+}
+
 export default function EventsPage() {
   const { filteredEvents, recentEventsLimit } = useDashboard();
   const [page, setPage] = useState(0);
@@ -38,18 +59,6 @@ export default function EventsPage() {
     else { setSortKey(key); setSortDir('desc'); }
   };
 
-  const SortHeader = ({ label, sortId }: { label: string; sortId: SortKey }) => (
-    <th
-      onClick={() => toggleSort(sortId)}
-      className="text-left text-[10px] font-semibold text-text-muted uppercase tracking-wider py-3 px-3 cursor-pointer hover:text-text-secondary transition-colors select-none"
-    >
-      <span className="inline-flex items-center gap-1">
-        {label}
-        <ArrowUpDown className={`w-3 h-3 ${sortKey === sortId ? 'text-signal-primary' : 'opacity-30'}`} />
-      </span>
-    </th>
-  );
-
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -74,12 +83,12 @@ export default function EventsPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-border">
-                  <SortHeader label="Time" sortId="event_time" />
-                  <SortHeader label="System" sortId="system_id" />
+                  <SortHeader label="Time" sortId="event_time" activeSortKey={sortKey} onToggleSort={toggleSort} />
+                  <SortHeader label="System" sortId="system_id" activeSortKey={sortKey} onToggleSort={toggleSort} />
                   <th className="text-left text-[10px] font-semibold text-text-muted uppercase tracking-wider py-3 px-3">Provider</th>
                   <th className="text-left text-[10px] font-semibold text-text-muted uppercase tracking-wider py-3 px-3">ID</th>
-                  <SortHeader label="Severity" sortId="severity" />
-                  <SortHeader label="Fault Type" sortId="fault_type" />
+                  <SortHeader label="Severity" sortId="severity" activeSortKey={sortKey} onToggleSort={toggleSort} />
+                  <SortHeader label="Fault Type" sortId="fault_type" activeSortKey={sortKey} onToggleSort={toggleSort} />
                   <th className="text-left text-[10px] font-semibold text-text-muted uppercase tracking-wider py-3 px-3">Message</th>
                 </tr>
               </thead>

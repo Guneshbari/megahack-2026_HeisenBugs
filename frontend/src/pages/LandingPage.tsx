@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, ArrowRight, Loader2, Eye, EyeOff, Activity, Server, Zap, Lock } from 'lucide-react';
-import { useAuth, getFirebaseErrorMessage } from '../context/AuthContext';
+import { useAuth } from '../context/AuthContext';
+import { getFirebaseErrorMessage } from '../lib/authErrors';
 import NetworkAnimation from '../components/three/NetworkAnimation';
 
 export default function LandingPage() {
@@ -57,7 +58,7 @@ export default function LandingPage() {
         setError('Password must contain at least one number.');
         return;
       }
-      if (!/(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?])/.test(password)) {
+      if (!/(?=.*[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?])/.test(password)) {
         setError('Password must contain at least one special character.');
         return;
       }

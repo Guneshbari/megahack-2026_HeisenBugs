@@ -11,7 +11,6 @@ import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { hasConfiguredApiBearerToken, syncApiSessionAuth } from '../lib/api';
 
-// ── Types ───────────────────────────────────────────────
 interface User {
   name: string;
   email: string;
@@ -29,40 +28,14 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-// ── Helper: map Firebase user to our User type ───────────
-function mapFirebaseUser(fbUser: FirebaseUser): User {
+function mapFirebaseUser(firebaseUser: FirebaseUser): User {
   return {
-    name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
-    email: fbUser.email || '',
-    uid: fbUser.uid,
+    name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+    email: firebaseUser.email || '',
+    uid: firebaseUser.uid,
   };
 }
 
-// ── Helper: map Firebase error codes to friendly messages ─
-export function getFirebaseErrorMessage(code: string): string {
-  switch (code) {
-    case 'auth/email-already-in-use':
-      return 'This email is already registered. Try signing in instead.';
-    case 'auth/invalid-email':
-      return 'Please enter a valid email address.';
-    case 'auth/invalid-credential':
-      return 'Invalid email or password. Please try again.';
-    case 'auth/user-not-found':
-      return 'No account found with this email. Please sign up.';
-    case 'auth/wrong-password':
-      return 'Incorrect password. Please try again.';
-    case 'auth/weak-password':
-      return 'Password must be at least 6 characters.';
-    case 'auth/too-many-requests':
-      return 'Too many attempts. Please try again later.';
-    case 'auth/network-request-failed':
-      return 'Network error. Please check your connection.';
-    default:
-      return 'An unexpected error occurred. Please try again.';
-  }
-}
-
-// ── Provider ─────────────────────────────────────────────
 interface AuthProviderProps {
   readonly children: ReactNode;
 }
@@ -71,31 +44,31 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Listen for Firebase auth state changes
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      syncApiSessionAuth(!!fbUser);
-      if (fbUser) {
-        // Try to get extra profile data from Firestore
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      syncApiSessionAuth(!!firebaseUser);
+
+      if (firebaseUser) {
         try {
-          const profileDoc = await getDoc(doc(db, 'users', fbUser.uid));
+          const profileDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (profileDoc.exists()) {
-            const data = profileDoc.data();
+            const profileData = profileDoc.data();
             setUser({
-              name: data.name || fbUser.displayName || 'User',
-              email: fbUser.email || '',
-              uid: fbUser.uid,
+              name: profileData.name || firebaseUser.displayName || 'User',
+              email: firebaseUser.email || '',
+              uid: firebaseUser.uid,
             });
           } else {
-            setUser(mapFirebaseUser(fbUser));
+            setUser(mapFirebaseUser(firebaseUser));
           }
         } catch (error) {
           console.warn('SentinelCore auth profile fallback:', error);
-          setUser(mapFirebaseUser(fbUser));
+          setUser(mapFirebaseUser(firebaseUser));
         }
       } else {
         setUser(null);
       }
+
       setIsLoading(false);
     });
 
@@ -112,16 +85,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const login = useCallback(async (email: string, password: string) => {
     await signInWithEmailAndPassword(auth, email, password);
-    // onAuthStateChanged will update the user state
   }, []);
 
   const signup = useCallback(async (name: string, email: string, password: string) => {
     const credential = await createUserWithEmailAndPassword(auth, email, password);
 
-    // Set display name on Firebase Auth profile
     await updateProfile(credential.user, { displayName: name });
 
-    // Store user profile in Firestore
     await setDoc(doc(db, 'users', credential.user.uid), {
       name,
       email,
@@ -129,7 +99,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
       role: 'operator',
     });
 
-    // Update local state immediately (don't wait for onAuthStateChanged)
     setUser({
       name,
       email,
@@ -160,9 +129,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
   );
 }
 
-// ── Hook ─────────────────────────────────────────────────
 export function useAuth(): AuthState {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
-  return ctx;
+  const contextValue = useContext(AuthContext);
+  if (!contextValue) {
+    throw new Error('useAuth must be used within AuthProvider');
+  }
+  return contextValue;
 }
