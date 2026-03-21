@@ -1,6 +1,6 @@
 """
 SentinelCore — Comprehensive Test Suite
-Targets: /mnt/project source files directly.
+Targets: src/ project files (auto-detected relative to this file).
 
 Coverage:
   ✓ Unit tests          — every pure function tested in isolation
@@ -46,47 +46,34 @@ for _m in _STUBS:
 import uuid as _uuid_real
 sys.modules['uuid'] = _uuid_real
 
-# Resolve PROJECT to the `src/` directory, works on both Linux (Docker) and Windows
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT = os.path.join(_THIS_DIR, '..', 'src')
-if not os.path.isdir(PROJECT):
-    # Fallback for legacy Docker layout where sources are in /mnt/project
-    PROJECT = '/mnt/project'
-PROJECT = os.path.normpath(PROJECT)
-sys.path.insert(0, PROJECT)
+# Auto-detect src/ relative to this test file — works on any machine
+# Structure: tests/test_sentinelcore.py  →  ../src/
+_TESTS_DIR    = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_TESTS_DIR)
+PROJECT       = os.path.join(_PROJECT_ROOT, "src")
+if PROJECT not in sys.path:
+    sys.path.insert(0, PROJECT)
 
-import shared_constants as SC  # noqa: E402
-import sentinel_utils as SU    # noqa: E402
-import analyzer as AZ          # noqa: E402
+import shared_constants as SC
+import sentinel_utils as SU
+import analyzer as AZ
 
 import importlib.util as _ilu
-import types
 
-def _load(name: str, filename: str):
+def _load(name, filename):
     spec = _ilu.spec_from_file_location(name, os.path.join(PROJECT, filename))
-    if spec is None or spec.loader is None:
-        print(f"[WARN] Could not create spec for {filename}")
-        return None, False
-    mod = _ilu.module_from_spec(spec)
+    mod  = _ilu.module_from_spec(spec)
     try:
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        spec.loader.exec_module(mod)
         return mod, True
     except Exception as e:
         print(f"[WARN] Could not load {filename}: {e}")
         return None, False
 
-_raw_ktp, KTP_OK  = _load("ktp",  "kafka_to_postgres.py")
-_raw_fb,  FB_OK   = _load("fb",   "feature_builder.py")
-_raw_api, API_OK  = _load("api",  "api_server.py")
-_raw_col, COL_OK  = _load("col",  "collector.py")
-
-# cast() tells Pyright these are ModuleType at use-sites;
-# runtime safety is enforced by @unittest.skipUnless on every test class.
-from typing import cast as _cast
-_ktp = _cast(types.ModuleType, _raw_ktp)
-_fb  = _cast(types.ModuleType, _raw_fb)
-_api = _cast(types.ModuleType, _raw_api)
-_col = _cast(types.ModuleType, _raw_col)
+_ktp, KTP_OK  = _load("ktp",  "kafka_to_postgres.py")
+_fb,  FB_OK   = _load("fb",   "feature_builder.py")
+_api, API_OK  = _load("api",  "api_server.py")
+_col, COL_OK  = _load("col",  "collector.py")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

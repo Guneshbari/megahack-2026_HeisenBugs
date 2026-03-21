@@ -21,7 +21,12 @@ for m in ['win32evtlog','pywintypes','winreg','kafka','kafka.errors',
 import uuid as _uuid_real
 sys.modules['uuid'] = _uuid_real
 
-sys.path.insert(0, '/home/claude')
+# Auto-detect src/ relative to this test file — works on any machine
+_TESTS_DIR    = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_TESTS_DIR)
+_SRC_DIR      = os.path.join(_PROJECT_ROOT, "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 import shared_constants as SC
 import importlib.util as _ilu
@@ -36,9 +41,9 @@ def _load(name, path):
         print(f"[WARN] {path}: {e}")
         return None, False
 
-_ktp, KTP_OK = _load("ktp",  "/home/claude/kafka_to_postgres.py")
-_fb,  FB_OK  = _load("fb",   "/home/claude/feature_builder.py")
-_api, API_OK = _load("api",  "/home/claude/api_server.py")
+_ktp, KTP_OK = _load("ktp",  os.path.join(_SRC_DIR, "kafka_to_postgres.py"))
+_fb,  FB_OK  = _load("fb",   os.path.join(_SRC_DIR, "feature_builder.py"))
+_api, API_OK = _load("api",  os.path.join(_SRC_DIR, "api_server.py"))
 
 
 def _mock_cursor_conn(rows=None):
@@ -329,7 +334,7 @@ class TestConnectionPool(unittest.TestCase):
         The pool must be instantiated as ThreadedConnectionPool, not
         SimpleConnectionPool.  We check the instantiation line, not comments.
         """
-        source = open('/home/claude/api_server.py').read()
+        source = open(os.path.join(_SRC_DIR, 'api_server.py')).read()
         self.assertIn("ThreadedConnectionPool", source,
                       "ThreadedConnectionPool not found in api_server.py")
         # The pool variable annotation and constructor must use Threaded, not Simple.
@@ -346,7 +351,7 @@ class TestConnectionPool(unittest.TestCase):
 
     def test_pool_uses_constants_not_magic_numbers(self):
         """Pool sizes must come from shared_constants, not hardcoded 1/10."""
-        source = open('/home/claude/api_server.py').read()
+        source = open(os.path.join(_SRC_DIR, 'api_server.py')).read()
         self.assertIn("DB_POOL_MIN_CONN", source)
         self.assertIn("DB_POOL_MAX_CONN", source)
         # Should NOT contain the old hardcoded values

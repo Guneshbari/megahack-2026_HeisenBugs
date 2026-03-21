@@ -29,7 +29,18 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import psycopg2
+# psycopg2 is only needed on the SERVER (kafka_to_postgres, api_server, feature_builder).
+# collector.py runs on Windows PCs which do NOT have psycopg2 installed.
+# Importing it here at the top level would break collector.py on every Windows machine.
+# Instead we import it lazily inside make_db_connection() — the only function that needs it.
+# Windows machines that only use retry_with_backoff, CircuitBreaker, clean_message etc.
+# are completely unaffected.
+try:
+    import psycopg2 as _psycopg2
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _psycopg2 = None
+    _PSYCOPG2_AVAILABLE = False
 
 from shared_constants import (
     RETRY_MAX_ATTEMPTS,
@@ -196,12 +207,20 @@ class CircuitBreaker:
 # DATABASE CONNECTION FACTORY
 # ============================================================================
 
-def make_db_connection() -> psycopg2.extensions.connection:
+def make_db_connection():
     """
     Open a fresh psycopg2 connection using DB_CONFIG from shared_constants.
-    Raises on failure — wrap with retry_with_backoff at the call site.
+    Only call this from server-side scripts (kafka_to_postgres, api_server, feature_builder).
+    Raises ImportError clearly if psycopg2 is not installed (e.g. on Windows collector machines).
+    Raises on connection failure — wrap with retry_with_backoff at the call site.
     """
-    return psycopg2.connect(**DB_CONFIG)
+    if not _PSYCOPG2_AVAILABLE:
+        raise ImportError(
+            "psycopg2 is not installed. "
+            "make_db_connection() is for server-side scripts only. "
+            "Install it on the server with: pip install psycopg2-binary"
+        )
+    return _psycopg2.connect(**DB_CONFIG)
 
 
 # ============================================================================

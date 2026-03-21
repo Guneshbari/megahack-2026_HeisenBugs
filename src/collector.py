@@ -69,9 +69,11 @@ from sentinel_utils import (
     timeout_wrapper,
     CircuitBreaker,
     clean_message,
-    make_db_connection,
     structured_log,
 )
+# NOTE: make_db_connection intentionally NOT imported — collector.py sends events
+# to Kafka and never touches the database directly. Database operations live
+# exclusively on the central server (kafka_to_postgres.py, api_server.py, feature_builder.py).
 _clean_message = clean_message  # backward-compat alias
 
 
@@ -131,7 +133,15 @@ LOCAL_TESTING_MODE = os.getenv("SENTINEL_LOCAL_MODE", "false").lower() == "true"
 KAFKA_MODE          = os.getenv("SENTINEL_KAFKA_MODE", "true").lower() == "true"
 
 # Kafka
-KAFKA_BOOTSTRAP_SERVERS  = os.getenv("KAFKA_BOOTSTRAP", _CONFIG["kafka"]["bootstrap_servers"])
+# Accept SENTINEL_KAFKA_HOST (preferred) or legacy KAFKA_BOOTSTRAP env var
+# This lets each Windows PC be configured without touching config.json:
+#   set SENTINEL_KAFKA_HOST=192.168.1.100:9092   (Windows — permanent)
+#   $env:SENTINEL_KAFKA_HOST="192.168.1.100:9092" (PowerShell — session)
+KAFKA_BOOTSTRAP_SERVERS  = (
+    os.getenv("SENTINEL_KAFKA_HOST")
+    or os.getenv("KAFKA_BOOTSTRAP")
+    or _CONFIG["kafka"]["bootstrap_servers"]
+)
 KAFKA_TOPIC              = _CONFIG["kafka"]["topic"]
 KAFKA_CLIENT_ID          = _CONFIG["kafka"]["client_id"]
 KAFKA_ACKS               = _CONFIG["kafka"]["acks"]
