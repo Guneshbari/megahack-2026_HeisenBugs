@@ -1,49 +1,59 @@
 """
-SentinelCore — Kafka → PostgreSQL Consumer
-Version: 2.0.0
+SentinelCore - Kafka to PostgreSQL consumer.
 
-Responsibilities:
-  - Consume from Kafka topic 'sentinel-events' (poll-based, non-blocking)
-  - Upsert system_heartbeats on EVERY message (even zero-event payloads)
-  - Insert enriched events into the events table (idempotent via event_hash)
-  - Maintain feature_snapshots and extended ML columns
-  - Graceful shutdown via SIGTERM / KeyboardInterrupt
+This consumer preserves the existing pipeline contract while adding:
+  - environment-driven Kafka and batch tuning
+  - modular message processing helpers
+  - Kafka lag and throughput observability
+  - DB slowdown backoff instead of crash loops
+  - retention cleanup hooks
+  - optional partitioned-table preparation for future rollout
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import signal
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from kafka import KafkaConsumer          # type: ignore
-from kafka.errors import KafkaError      # type: ignore
-import psycopg2
+from kafka import KafkaConsumer  # type: ignore
+from kafka.errors import KafkaError  # type: ignore
 from psycopg2.extras import Json, execute_values
 
 from shared_constants import (
-    DB_CONFIG,
-    RETRY_MAX_ATTEMPTS,
-    RETRY_BACKOFF_SECONDS,
-    CIRCUIT_BREAKER_THRESHOLD,
     CIRCUIT_BREAKER_RESET_SECS,
-    DB_QUERY_TIMEOUT_SECONDS,
+    CIRCUIT_BREAKER_THRESHOLD,
+    CONSUMER_DB_BACKOFF_SECS,
+    CONSUMER_DB_SLOW_MS,
+    DATA_RETENTION_DAYS,
     DB_INSERT_BATCH_SIZE,
+    EVENT_PARTITIONING_ENABLED,
+    EVENT_PARTITION_MONTHS_AHEAD,
+    EVENT_PARTITION_MONTHS_BEHIND,
+    KAFKA_BOOTSTRAP_SERVERS,
+    KAFKA_CONSUMER_CLIENT_ID,
+    KAFKA_GROUP_ID,
+    KAFKA_LAG_LOG_INTERVAL_SECS,
+    KAFKA_LAG_WARNING_THRESHOLD,
+    KAFKA_MAX_POLL_RECORDS,
+    KAFKA_MIN_TOPIC_PARTITIONS,
+    KAFKA_POLL_TIMEOUT_MS,
+    KAFKA_TOPIC,
     RAW_XML_MAX_BYTES,
+    RETENTION_CLEANUP_ENABLED,
+    RETENTION_CLEANUP_INTERVAL_SECS,
+    RETENTION_DELETE_BATCH_SIZE,
 )
 from sentinel_utils import (
-    retry_with_backoff,
-    timeout_wrapper,
     CircuitBreaker,
     clean_message,
     make_db_connection,
+    retry_with_backoff,
     structured_log,
 )
-
-# ============================================================================
-# LOGGING
-# ============================================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,66 +62,191 @@ logging.basicConfig(
 )
 logger = logging.getLogger("kafka_to_postgres")
 
-# ============================================================================
-# KAFKA CONFIG
-# ============================================================================
-
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
-KAFKA_TOPIC             = "sentinel-events"
-KAFKA_GROUP_ID          = "postgres-ingester-group"
-KAFKA_POLL_TIMEOUT_MS   = 5_000   # poll returns after this many ms if no messages
-
-# ============================================================================
-# DB STATE
-# ============================================================================
-
 _db_cb = CircuitBreaker(
     threshold=CIRCUIT_BREAKER_THRESHOLD,
     reset_secs=CIRCUIT_BREAKER_RESET_SECS,
     label="PostgreSQL",
 )
+_kafka_cb = CircuitBreaker(
+    threshold=CIRCUIT_BREAKER_THRESHOLD,
+    reset_secs=CIRCUIT_BREAKER_RESET_SECS,
+    label="Kafka",
+)
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    """Convert values to float with a deterministic fallback."""
+    try:
+        return float(value) if value is not None else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _truncate_text_bytes(raw_text: str, max_bytes: int) -> str:
+    """Truncate text by encoded byte size while keeping UTF-8 valid."""
+    encoded = (raw_text or "").encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return raw_text or ""
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _shift_month(dt: datetime, month_delta: int) -> datetime:
+    """Shift a timezone-aware datetime to another month boundary."""
+    month_index = dt.month - 1 + month_delta
+    year = dt.year + month_index // 12
+    month = month_index % 12 + 1
+    return dt.replace(year=year, month=month)
+
+
+def _extract_events_from_payload(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Return a normalized event list.
+
+    Supports both the existing collector payload format:
+      {"event": {...}, ...}
+    and batched payloads:
+      {"events": [{...}, ...], ...}
+    """
+    batched_events = message.get("events")
+    if isinstance(batched_events, list):
+        return [event for event in batched_events if isinstance(event, dict)]
+
+    single_event = message.get("event")
+    if isinstance(single_event, dict):
+        return [single_event]
+
+    return []
+
+
+def _extract_resource_metric(
+    system_info: Dict[str, Any],
+    events: Sequence[Dict[str, Any]],
+    key: str,
+    fallback: float,
+) -> float:
+    """Prefer heartbeat metrics and fall back to the first event metric."""
+    if key in system_info:
+        return _safe_float(system_info[key], fallback)
+    if events and key in events[0]:
+        return _safe_float(events[0][key], fallback)
+    return fallback
 
 
 def _get_healthy_conn(existing: Optional[Any] = None) -> Any:
-    """
-    Return a live psycopg2 connection.
-    Pings an existing connection first; reconnects on failure.
-    Raises RuntimeError if circuit is open or all retries exhausted.
-    """
+    """Return a live psycopg2 connection, reconnecting if needed."""
     if not _db_cb.allow():
-        raise RuntimeError("[CB:PostgreSQL] Circuit OPEN — skipping DB operation")
+        raise RuntimeError("[CB:PostgreSQL] Circuit OPEN - skipping DB operation")
 
     if existing is not None:
         try:
             with existing.cursor() as cur:
                 cur.execute("SELECT 1")
             return existing
-        except Exception:
-            logger.warning("DB connection unhealthy — reconnecting")
+        except Exception as exc:
+            logger.warning("DB connection unhealthy - reconnecting: %s", exc)
+            structured_log(
+                "kafka_to_postgres",
+                {
+                    "operation": "db_healthcheck",
+                    "status": "failed",
+                    "error": str(exc),
+                },
+                log=logger,
+            )
             try:
                 existing.close()
             except Exception:
                 pass
 
-    conn, ok = retry_with_backoff(make_db_connection, label="DB_reconnect")
+    conn, ok = retry_with_backoff(make_db_connection, label="consumer_db_reconnect")
     if not ok or conn is None:
         _db_cb.record_failure()
         raise RuntimeError("Failed to connect to DB after retries")
 
     _db_cb.record_success()
+    structured_log(
+        "kafka_to_postgres",
+        {
+            "operation": "db_connect",
+            "status": "ok",
+            "connection_reused": existing is not None,
+        },
+        log=logger,
+    )
     return conn
 
 
-# ============================================================================
-# SCHEMA SETUP
-# ============================================================================
+def _ensure_partition_shadow_tables(cur: Any) -> None:
+    """
+    Prepare a partitioned shadow table for future rollout.
+
+    This is intentionally separate from the live `events` table so the
+    existing schema and write path remain backward compatible.
+    """
+    if not EVENT_PARTITIONING_ENABLED:
+        return
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events_partitioned (
+            id                   BIGINT GENERATED ALWAYS AS IDENTITY,
+            system_id            VARCHAR(100),
+            hostname             VARCHAR(255),
+            log_channel          VARCHAR(100),
+            event_record_id      BIGINT,
+            provider_name        VARCHAR(255),
+            event_id             INTEGER,
+            level                INTEGER,
+            task                 INTEGER,
+            opcode               INTEGER,
+            keywords             VARCHAR(50),
+            process_id           INTEGER,
+            thread_id            INTEGER,
+            severity             VARCHAR(20),
+            fault_type           VARCHAR(50),
+            diagnostic_context   JSONB,
+            event_hash           VARCHAR(64),
+            raw_xml              TEXT,
+            cpu_usage_percent    NUMERIC(5,2),
+            memory_usage_percent NUMERIC(5,2),
+            disk_free_percent    NUMERIC(5,2),
+            event_message        TEXT DEFAULT '',
+            parsed_message       TEXT DEFAULT '',
+            normalized_message   TEXT DEFAULT '',
+            fault_subtype        VARCHAR(80) DEFAULT '',
+            confidence_score     NUMERIC(3,2) DEFAULT 0.20,
+            ingested_at          TIMESTAMP WITH TIME ZONE NOT NULL
+        ) PARTITION BY RANGE (ingested_at);
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_events_partitioned_system_ingested
+        ON events_partitioned(system_id, ingested_at DESC);
+        """
+    )
+
+    start_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_offsets = range(-EVENT_PARTITION_MONTHS_BEHIND, EVENT_PARTITION_MONTHS_AHEAD + 1)
+    for month_offset in month_offsets:
+        partition_start = _shift_month(start_month, month_offset)
+        partition_end = _shift_month(partition_start, 1)
+        partition_name = f"events_partitioned_{partition_start.strftime('%Y%m')}"
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {partition_name}
+            PARTITION OF events_partitioned
+            FOR VALUES FROM (%s) TO (%s);
+            """,
+            (partition_start, partition_end),
+        )
+
 
 def setup_database(conn: Any) -> None:
-    """Create / extend all tables. Fully idempotent — safe on every startup."""
+    """Create or extend all required tables and indexes safely."""
     with conn.cursor() as cur:
-
-        # ── events ────────────────────────────────────────────────────────────
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS events (
                 id                   SERIAL PRIMARY KEY,
                 system_id            VARCHAR(100),
@@ -142,26 +277,27 @@ def setup_database(conn: Any) -> None:
                 ON events(ingested_at DESC);
             CREATE INDEX IF NOT EXISTS idx_events_severity
                 ON events(severity);
-            -- Composite index for feature_builder and API range queries:
-            --   WHERE system_id = X AND ingested_at > NOW() - interval
             CREATE INDEX IF NOT EXISTS idx_events_system_ingested
                 ON events(system_id, ingested_at DESC);
-        """)
+            """
+        )
 
-        # ML-enrichment columns — ADD IF NOT EXISTS (backward compatible)
-        for col, col_type, default in [
-            ("event_message",      "TEXT",          "''"),
-            ("parsed_message",     "TEXT",          "''"),
-            ("normalized_message", "TEXT",          "''"),
-            ("fault_subtype",      "VARCHAR(80)",   "''"),
-            ("confidence_score",   "NUMERIC(3,2)",  "0.20"),
+        for column_name, column_type, default_value in [
+            ("event_message", "TEXT", "''"),
+            ("parsed_message", "TEXT", "''"),
+            ("normalized_message", "TEXT", "''"),
+            ("fault_subtype", "VARCHAR(80)", "''"),
+            ("confidence_score", "NUMERIC(3,2)", "0.20"),
         ]:
             cur.execute(
-                f"ALTER TABLE events ADD COLUMN IF NOT EXISTS {col} {col_type} DEFAULT {default};"
+                f"""
+                ALTER TABLE events
+                ADD COLUMN IF NOT EXISTS {column_name} {column_type} DEFAULT {default_value};
+                """
             )
 
-        # ── system_heartbeats ─────────────────────────────────────────────────
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS system_heartbeats (
                 system_id            VARCHAR(100) PRIMARY KEY,
                 hostname             VARCHAR(255),
@@ -174,316 +310,622 @@ def setup_database(conn: Any) -> None:
                 uptime_seconds       BIGINT,
                 last_seen            TIMESTAMP WITH TIME ZONE
             );
-        """)
+            """
+        )
 
-        # ── feature_snapshots (ML time-series) ───────────────────────────────
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS feature_snapshots (
                 id                   SERIAL PRIMARY KEY,
-                system_id            VARCHAR(100)  NOT NULL,
+                system_id            VARCHAR(100) NOT NULL,
                 snapshot_time        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                cpu_usage_percent    NUMERIC(5,2)  NOT NULL DEFAULT 0,
-                memory_usage_percent NUMERIC(5,2)  NOT NULL DEFAULT 0,
-                disk_free_percent    NUMERIC(5,2)  NOT NULL DEFAULT 100,
-                total_events         INTEGER       NOT NULL DEFAULT 0,
-                critical_count       INTEGER       NOT NULL DEFAULT 0,
-                error_count          INTEGER       NOT NULL DEFAULT 0,
-                warning_count        INTEGER       NOT NULL DEFAULT 0,
-                info_count           INTEGER       NOT NULL DEFAULT 0,
-                dominant_fault_type  VARCHAR(50)   NOT NULL DEFAULT 'NONE',
-                avg_confidence       NUMERIC(3,2)  NOT NULL DEFAULT 0.20
+                cpu_usage_percent    NUMERIC(5,2) NOT NULL DEFAULT 0,
+                memory_usage_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
+                disk_free_percent    NUMERIC(5,2) NOT NULL DEFAULT 100,
+                total_events         INTEGER NOT NULL DEFAULT 0,
+                critical_count       INTEGER NOT NULL DEFAULT 0,
+                error_count          INTEGER NOT NULL DEFAULT 0,
+                warning_count        INTEGER NOT NULL DEFAULT 0,
+                info_count           INTEGER NOT NULL DEFAULT 0,
+                dominant_fault_type  VARCHAR(50) NOT NULL DEFAULT 'NONE',
+                avg_confidence       NUMERIC(3,2) NOT NULL DEFAULT 0.20
             );
             CREATE INDEX IF NOT EXISTS idx_snapshots_system_time
                 ON feature_snapshots(system_id, snapshot_time DESC);
-        """)
+            """
+        )
+
+        _ensure_partition_shadow_tables(cur)
 
     conn.commit()
-    logger.info("Database schema verified / migrated.")
+    logger.info("Database schema verified and migrated.")
+    structured_log(
+        "kafka_to_postgres",
+        {
+            "operation": "setup_database",
+            "status": "ok",
+            "partition_shadow_enabled": EVENT_PARTITIONING_ENABLED,
+        },
+        log=logger,
+    )
 
 
-# ============================================================================
-# MESSAGE PROCESSING
-# ============================================================================
+def update_heartbeat(cur: Any, msg: Dict[str, Any], heartbeat_time: Optional[datetime] = None) -> None:
+    """Upsert the latest heartbeat row for a system."""
+    events = _extract_events_from_payload(msg)
+    system_info = msg.get("system_info") or {}
+    heartbeat_time = heartbeat_time or datetime.now(timezone.utc)
+    system_id = msg.get("system_id") or system_info.get("system_id") or "unknown"
+    hostname = msg.get("hostname") or system_info.get("hostname") or "unknown"
+    cpu = _extract_resource_metric(system_info, events, "cpu_usage_percent", 0.0)
+    memory = _extract_resource_metric(system_info, events, "memory_usage_percent", 0.0)
+    disk = _extract_resource_metric(system_info, events, "disk_free_percent", 100.0)
 
-def _safe_float(value: Any, fallback: float = 0.0) -> float:
-    """Cast to float safely; return fallback on None / error."""
-    try:
-        return float(value) if value is not None else fallback
-    except (TypeError, ValueError):
-        return fallback
+    cur.execute(
+        """
+        INSERT INTO system_heartbeats (
+            system_id, hostname,
+            cpu_usage_percent, memory_usage_percent, disk_free_percent,
+            os_version, agent_version, ip_address,
+            uptime_seconds, last_seen
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (system_id) DO UPDATE SET
+            hostname             = EXCLUDED.hostname,
+            cpu_usage_percent    = EXCLUDED.cpu_usage_percent,
+            memory_usage_percent = EXCLUDED.memory_usage_percent,
+            disk_free_percent    = EXCLUDED.disk_free_percent,
+            os_version           = EXCLUDED.os_version,
+            agent_version        = EXCLUDED.agent_version,
+            ip_address           = EXCLUDED.ip_address,
+            uptime_seconds       = EXCLUDED.uptime_seconds,
+            last_seen            = EXCLUDED.last_seen;
+        """,
+        (
+            system_id,
+            hostname,
+            cpu,
+            memory,
+            disk,
+            system_info.get("os_version", msg.get("os_version", "Unknown")),
+            system_info.get("agent_version", msg.get("collector_version", "Unknown")),
+            system_info.get("ip_address", "Unknown"),
+            system_info.get("uptime_seconds", msg.get("uptime_seconds", 0)),
+            heartbeat_time,
+        ),
+    )
+
+
+def extract_and_prepare_events(msg: Dict[str, Any]) -> List[Tuple[Any, ...]]:
+    """Normalize the incoming payload and prepare rows for batch insert."""
+    system_info = msg.get("system_info") or {}
+    system_id = msg.get("system_id") or system_info.get("system_id") or "unknown"
+    hostname = msg.get("hostname") or system_info.get("hostname") or "unknown"
+    prepared_rows: List[Tuple[Any, ...]] = []
+
+    for event in _extract_events_from_payload(msg):
+        raw_message = event.get("event_message") or event.get("message") or ""
+        raw_xml = _truncate_text_bytes(event.get("raw_xml") or "", RAW_XML_MAX_BYTES)
+        parsed_message = clean_message(raw_message)
+        normalized_message = parsed_message.lower()
+        fault_subtype = event.get("fault_subtype") or event.get("fault_type") or "UNKNOWN"
+        confidence_score = max(0.0, min(1.0, _safe_float(event.get("confidence_score"), 0.20)))
+
+        prepared_rows.append(
+            (
+                system_id,
+                hostname,
+                event.get("log_channel"),
+                event.get("event_record_id"),
+                event.get("provider_name"),
+                event.get("event_id"),
+                event.get("level"),
+                event.get("task"),
+                event.get("opcode"),
+                event.get("keywords"),
+                event.get("process_id"),
+                event.get("thread_id"),
+                event.get("severity"),
+                event.get("fault_type"),
+                Json(event.get("diagnostic_context") or {}),
+                event.get("event_hash"),
+                raw_xml,
+                _safe_float(
+                    event.get("cpu_usage_percent"),
+                    _extract_resource_metric(system_info, [event], "cpu_usage_percent", 0.0),
+                ),
+                _safe_float(
+                    event.get("memory_usage_percent"),
+                    _extract_resource_metric(system_info, [event], "memory_usage_percent", 0.0),
+                ),
+                _safe_float(
+                    event.get("disk_free_percent"),
+                    _extract_resource_metric(system_info, [event], "disk_free_percent", 100.0),
+                ),
+                raw_message,
+                parsed_message,
+                normalized_message,
+                fault_subtype,
+                confidence_score,
+            )
+        )
+
+    return prepared_rows
+
+
+def insert_event_batch(cur: Any, rows: Sequence[Tuple[Any, ...]]) -> int:
+    """Insert prepared event rows in idempotent batches."""
+    inserted_batches = 0
+    for batch_start in range(0, len(rows), DB_INSERT_BATCH_SIZE):
+        batch_rows = rows[batch_start : batch_start + DB_INSERT_BATCH_SIZE]
+        execute_values(
+            cur,
+            """
+            INSERT INTO events (
+                system_id, hostname, log_channel, event_record_id,
+                provider_name, event_id, level, task, opcode, keywords,
+                process_id, thread_id, severity, fault_type,
+                diagnostic_context, event_hash, raw_xml,
+                cpu_usage_percent, memory_usage_percent, disk_free_percent,
+                event_message, parsed_message, normalized_message,
+                fault_subtype, confidence_score
+            ) VALUES %s
+            ON CONFLICT (event_hash) DO NOTHING
+            """,
+            batch_rows,
+            page_size=DB_INSERT_BATCH_SIZE,
+        )
+        inserted_batches += 1
+    return inserted_batches
 
 
 def process_message(conn: Any, msg: Dict[str, Any]) -> bool:
     """
-    Process one Kafka payload inside a single transaction.
+    Process a single Kafka payload transactionally.
 
-    Contract:
-      - Heartbeat update ALWAYS runs (even when events list is empty)
-      - Events inserted idempotently via ON CONFLICT (event_hash) DO NOTHING
-      - Full rollback on any failure — connection left in clean state
-      - Returns True on success, False on failure
+    The heartbeat upsert always runs, event inserts remain idempotent via
+    `event_hash`, and the function preserves the legacy bool return contract.
     """
-    system_id = msg.get("system_id") or "unknown"
-    hostname  = msg.get("hostname")  or "unknown"
-    sys_info  = msg.get("system_info") or {}
-    events    = msg.get("events") or []
-
-    # Derive resource metrics: prefer system_info, fall back to first event
-    def _res(key: str, fallback: float = 0.0) -> float:
-        if key in sys_info:
-            return _safe_float(sys_info[key], fallback)
-        if events and key in events[0]:
-            return _safe_float(events[0][key], fallback)
-        return fallback
-
-    cpu  = _res("cpu_usage_percent",    0.0)
-    mem  = _res("memory_usage_percent", 0.0)
-    disk = _res("disk_free_percent",  100.0)
+    system_id = msg.get("system_id") or (msg.get("system_info") or {}).get("system_id") or "unknown"
+    rows = extract_and_prepare_events(msg)
+    write_started_at = time.time()
 
     try:
         with conn.cursor() as cur:
-
-            # ── 1. Heartbeat — runs unconditionally ────────────────────────
-            cur.execute("""
-                INSERT INTO system_heartbeats (
-                    system_id, hostname,
-                    cpu_usage_percent, memory_usage_percent, disk_free_percent,
-                    os_version, agent_version, ip_address,
-                    uptime_seconds, last_seen
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (system_id) DO UPDATE SET
-                    hostname             = EXCLUDED.hostname,
-                    cpu_usage_percent    = EXCLUDED.cpu_usage_percent,
-                    memory_usage_percent = EXCLUDED.memory_usage_percent,
-                    disk_free_percent    = EXCLUDED.disk_free_percent,
-                    os_version           = EXCLUDED.os_version,
-                    agent_version        = EXCLUDED.agent_version,
-                    ip_address           = EXCLUDED.ip_address,
-                    uptime_seconds       = EXCLUDED.uptime_seconds,
-                    last_seen            = EXCLUDED.last_seen;
-            """, (
-                system_id,
-                hostname,
-                cpu, mem, disk,
-                sys_info.get("os_version",    "Unknown"),
-                sys_info.get("agent_version", "Unknown"),
-                sys_info.get("ip_address",    "Unknown"),
-                sys_info.get("uptime_seconds", 0),
-                datetime.now(timezone.utc),
-            ))
-
-            if not events:
-                logger.info(
-                    "[process_message] Heartbeat-only update (no events) for system_id=%s",
-                    system_id,
-                )
-
-            # ── 2. Events — batch insert via execute_values (one round-trip) ──
-            # Builds all rows first, then inserts in chunks of DB_INSERT_BATCH_SIZE.
-            # ON CONFLICT DO NOTHING ensures idempotency on duplicate event_hash.
-            rows = []
-            for ev in events:
-                raw_msg    = (ev.get("event_message") or "")
-                # Cap raw_xml to bound TEXT column growth at scale
-                raw_xml    = (ev.get("raw_xml") or "")
-                if len(raw_xml) > RAW_XML_MAX_BYTES:
-                    raw_xml = raw_xml[:RAW_XML_MAX_BYTES]
-
-                parsed     = clean_message(raw_msg)
-                normalized = parsed.lower()
-
-                fault_subtype    = ev.get("fault_subtype") or ev.get("fault_type") or "UNKNOWN"
-                confidence_score = _safe_float(ev.get("confidence_score"), 0.20)
-                confidence_score = max(0.0, min(1.0, confidence_score))
-
-                rows.append((
-                    system_id,
-                    hostname,
-                    ev.get("log_channel"),
-                    ev.get("event_record_id"),
-                    ev.get("provider_name"),
-                    ev.get("event_id"),
-                    ev.get("level"),
-                    ev.get("task"),
-                    ev.get("opcode"),
-                    ev.get("keywords"),
-                    ev.get("process_id"),
-                    ev.get("thread_id"),
-                    ev.get("severity"),
-                    ev.get("fault_type"),
-                    Json(ev.get("diagnostic_context") or {}),
-                    ev.get("event_hash"),
-                    raw_xml,
-                    _safe_float(ev.get("cpu_usage_percent")),
-                    _safe_float(ev.get("memory_usage_percent")),
-                    _safe_float(ev.get("disk_free_percent"), 100.0),
-                    raw_msg,
-                    parsed,
-                    normalized,
-                    fault_subtype,
-                    confidence_score,
-                ))
-
-            # Insert in chunks — one round-trip per DB_INSERT_BATCH_SIZE rows
-            for i in range(0, len(rows), DB_INSERT_BATCH_SIZE):
-                chunk = rows[i : i + DB_INSERT_BATCH_SIZE]
-                execute_values(
-                    cur,
-                    """
-                    INSERT INTO events (
-                        system_id, hostname, log_channel, event_record_id,
-                        provider_name, event_id, level, task, opcode, keywords,
-                        process_id, thread_id, severity, fault_type,
-                        diagnostic_context, event_hash, raw_xml,
-                        cpu_usage_percent, memory_usage_percent, disk_free_percent,
-                        event_message, parsed_message, normalized_message,
-                        fault_subtype, confidence_score
-                    ) VALUES %s
-                    ON CONFLICT (event_hash) DO NOTHING
-                    """,
-                    chunk,
-                    page_size=DB_INSERT_BATCH_SIZE,
-                )
-
+            update_heartbeat(cur, msg)
+            if rows:
+                insert_event_batch(cur, rows)
         conn.commit()
         _db_cb.record_success()
+        latency_ms = round((time.time() - write_started_at) * 1000, 2)
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "db_write",
+                "system_id": system_id,
+                "event_count": len(rows),
+                "db_write_latency_ms": latency_ms,
+                "status": "ok",
+            },
+            log=logger,
+        )
         return True
 
     except Exception as exc:
-        logger.error("[process_message] Transaction failed for %s: %s", system_id, exc)
+        logger.error("[process_message] Transaction failed for %s: %s", system_id, exc, exc_info=True)
         try:
             conn.rollback()
-        except Exception as rb_exc:
-            logger.error("[process_message] Rollback failed: %s", rb_exc)
+        except Exception as rollback_exc:
+            logger.error("[process_message] Rollback failed: %s", rollback_exc)
+            structured_log(
+                "kafka_to_postgres",
+                {
+                    "operation": "db_rollback",
+                    "system_id": system_id,
+                    "status": "failed",
+                    "error": str(rollback_exc),
+                },
+                log=logger,
+            )
         _db_cb.record_failure()
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "process_message",
+                "system_id": system_id,
+                "event_count": len(rows),
+                "status": "failed",
+                "error": str(exc),
+            },
+            log=logger,
+        )
         return False
 
 
-# ============================================================================
-# CONSUMER LOOP
-# ============================================================================
+def cleanup_expired_events(conn: Any) -> int:
+    """Delete expired event rows in small batches to avoid large table locks."""
+    if not RETENTION_CLEANUP_ENABLED:
+        return 0
+
+    deleted_rows = 0
+    with conn.cursor() as cur:
+        while True:
+            cur.execute(
+                """
+                WITH expired_rows AS (
+                    SELECT ctid
+                    FROM events
+                    WHERE ingested_at < NOW() - (%s || ' days')::interval
+                    ORDER BY ingested_at
+                    LIMIT %s
+                )
+                DELETE FROM events events_table
+                USING expired_rows
+                WHERE events_table.ctid = expired_rows.ctid;
+                """,
+                (str(DATA_RETENTION_DAYS), RETENTION_DELETE_BATCH_SIZE),
+            )
+            batch_deleted = cur.rowcount or 0
+            deleted_rows += batch_deleted
+            if batch_deleted < RETENTION_DELETE_BATCH_SIZE:
+                break
+    conn.commit()
+    if deleted_rows:
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "retention_cleanup",
+                "deleted_rows": deleted_rows,
+                "retention_days": DATA_RETENTION_DAYS,
+                "status": "ok",
+            },
+            log=logger,
+        )
+    return deleted_rows
+
+
+def ensure_kafka_topic_partitioning() -> None:
+    """Best-effort partition validation and expansion for the Kafka topic."""
+    try:
+        from kafka.admin import KafkaAdminClient, NewPartitions, NewTopic  # type: ignore
+
+        admin = KafkaAdminClient(
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            client_id=f"{KAFKA_CONSUMER_CLIENT_ID}-admin",
+        )
+        try:
+            topics = set(admin.list_topics())
+            if KAFKA_TOPIC not in topics:
+                admin.create_topics(
+                    [
+                        NewTopic(
+                            name=KAFKA_TOPIC,
+                            num_partitions=KAFKA_MIN_TOPIC_PARTITIONS,
+                            replication_factor=1,
+                        )
+                    ]
+                )
+                structured_log(
+                    "kafka_to_postgres",
+                    {
+                        "operation": "ensure_topic_partitioning",
+                        "topic": KAFKA_TOPIC,
+                        "partitions": KAFKA_MIN_TOPIC_PARTITIONS,
+                        "status": "created",
+                    },
+                    log=logger,
+                )
+                return
+
+            metadata = admin.describe_topics([KAFKA_TOPIC])[0]
+            existing_partitions = len(metadata.get("partitions", []))
+            if existing_partitions < KAFKA_MIN_TOPIC_PARTITIONS:
+                admin.create_partitions(
+                    {KAFKA_TOPIC: NewPartitions(total_count=KAFKA_MIN_TOPIC_PARTITIONS)}
+                )
+                structured_log(
+                    "kafka_to_postgres",
+                    {
+                        "operation": "ensure_topic_partitioning",
+                        "topic": KAFKA_TOPIC,
+                        "partitions_before": existing_partitions,
+                        "partitions_after": KAFKA_MIN_TOPIC_PARTITIONS,
+                        "status": "scaled",
+                    },
+                    log=logger,
+                )
+            else:
+                structured_log(
+                    "kafka_to_postgres",
+                    {
+                        "operation": "ensure_topic_partitioning",
+                        "topic": KAFKA_TOPIC,
+                        "partitions": existing_partitions,
+                        "status": "ok",
+                    },
+                    log=logger,
+                )
+        finally:
+            admin.close()
+    except Exception as exc:
+        _kafka_cb.record_failure()
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "ensure_topic_partitioning",
+                "topic": KAFKA_TOPIC,
+                "status": "failed",
+                "error": str(exc),
+            },
+            log=logger,
+        )
+
+
+def log_kafka_lag(consumer: KafkaConsumer) -> None:
+    """Emit aggregate lag for all assigned partitions."""
+    try:
+        assigned_partitions = list(consumer.assignment())
+        if not assigned_partitions:
+            return
+
+        end_offsets = consumer.end_offsets(assigned_partitions)
+        total_lag = 0
+        max_partition_lag = 0
+        for partition in assigned_partitions:
+            current_offset = consumer.position(partition)
+            partition_lag = max(0, end_offsets.get(partition, 0) - current_offset)
+            total_lag += partition_lag
+            max_partition_lag = max(max_partition_lag, partition_lag)
+
+        lag_status = "warning" if total_lag >= KAFKA_LAG_WARNING_THRESHOLD else "ok"
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "kafka_lag",
+                "status": lag_status,
+                "topic": KAFKA_TOPIC,
+                "partition_count": len(assigned_partitions),
+                "total_lag": total_lag,
+                "max_partition_lag": max_partition_lag,
+            },
+            log=logger,
+        )
+    except Exception as exc:
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "kafka_lag",
+                "status": "failed",
+                "topic": KAFKA_TOPIC,
+                "error": str(exc),
+            },
+            log=logger,
+        )
+
 
 def run_consumer() -> None:
-    _shutdown = False
+    """Run the Kafka consumer loop until interrupted."""
+    shutdown_requested = False
 
-    def _handle_signal(signum: int, frame: Any) -> None:
-        nonlocal _shutdown
-        logger.info("[graceful_shutdown] Signal %d received — stopping consumer", signum)
-        _shutdown = True
+    def handle_signal(signum: int, frame: Any) -> None:
+        nonlocal shutdown_requested
+        logger.info("[graceful_shutdown] Signal %d received - stopping consumer", signum)
+        shutdown_requested = True
 
-    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
 
-    # Initial DB connection with retry
-    conn, ok = retry_with_backoff(make_db_connection, label="initial_DB_connect")
+    conn, ok = retry_with_backoff(make_db_connection, label="consumer_initial_db_connect")
     if not ok or conn is None:
-        logger.critical("Cannot connect to PostgreSQL on startup — aborting")
+        logger.critical("Cannot connect to PostgreSQL on startup - aborting")
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "startup_db_connect",
+                "status": "failed",
+            },
+            log=logger,
+        )
         return
 
     setup_database(conn)
+    ensure_kafka_topic_partitioning()
 
-    # poll()-based consumer — never blocks indefinitely
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id=KAFKA_GROUP_ID,
+        client_id=KAFKA_CONSUMER_CLIENT_ID,
         auto_offset_reset="latest",
         enable_auto_commit=True,
         consumer_timeout_ms=KAFKA_POLL_TIMEOUT_MS,
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+        max_poll_records=KAFKA_MAX_POLL_RECORDS,
+        value_deserializer=lambda raw_message: json.loads(raw_message.decode("utf-8")),
     )
 
     logger.info(
-        "Listening on Kafka topic '%s' (poll timeout: %dms) ...",
-        KAFKA_TOPIC, KAFKA_POLL_TIMEOUT_MS,
+        "Listening on Kafka topic '%s' via %s (group=%s)",
+        KAFKA_TOPIC,
+        KAFKA_BOOTSTRAP_SERVERS,
+        KAFKA_GROUP_ID,
     )
 
-    processed = 0
-    failed    = 0
+    processed_messages = 0
+    failed_messages = 0
+    processed_events = 0
+    next_cleanup_at = time.time() + RETENTION_CLEANUP_INTERVAL_SECS
+    next_lag_log_at = time.time() + KAFKA_LAG_LOG_INTERVAL_SECS
 
     try:
-        while not _shutdown:
-            # poll() is non-blocking — returns {} when no messages within timeout
+        while not shutdown_requested:
             try:
                 records = consumer.poll(
-                    timeout_ms=KAFKA_POLL_TIMEOUT_MS, max_records=50
+                    timeout_ms=KAFKA_POLL_TIMEOUT_MS,
+                    max_records=KAFKA_MAX_POLL_RECORDS,
                 )
-            except KafkaError as ke:
-                logger.error("[consumer.poll] Kafka error: %s — sleeping 5s", ke)
-                time.sleep(5)
+            except KafkaError as exc:
+                _kafka_cb.record_failure()
+                logger.error("[consumer.poll] Kafka error: %s - sleeping %.1fs", exc, CONSUMER_DB_BACKOFF_SECS)
+                structured_log(
+                    "kafka_to_postgres",
+                    {
+                        "operation": "consumer_poll",
+                        "status": "failed",
+                        "error": str(exc),
+                    },
+                    log=logger,
+                )
+                time.sleep(CONSUMER_DB_BACKOFF_SECS)
                 continue
-            except Exception as poll_exc:
-                logger.error("[consumer.poll] Unexpected: %s — sleeping 5s", poll_exc)
-                time.sleep(5)
+            except Exception as exc:
+                logger.error("[consumer.poll] Unexpected poll error: %s", exc, exc_info=True)
+                structured_log(
+                    "kafka_to_postgres",
+                    {
+                        "operation": "consumer_poll",
+                        "status": "failed",
+                        "error": str(exc),
+                    },
+                    log=logger,
+                )
+                time.sleep(CONSUMER_DB_BACKOFF_SECS)
                 continue
 
             if not records:
-                continue  # idle poll window — keep loop alive
-
-            for _tp, messages in records.items():
-                for message in messages:
-                    if _shutdown:
-                        break
-
-                    t0       = time.time()
-                    payload  = message.value
-                    hostname = payload.get("hostname", "unknown")
-                    sys_id   = payload.get("system_id", "unknown")
-
-                    # Re-validate DB connection before each message
+                if RETENTION_CLEANUP_ENABLED and time.time() >= next_cleanup_at:
                     try:
                         conn = _get_healthy_conn(conn)
-                    except RuntimeError as conn_exc:
-                        logger.error(
-                            "[consumer] DB unavailable: %s — skipping message", conn_exc
-                        )
-                        failed += 1
+                        cleanup_expired_events(conn)
+                    except Exception as exc:
                         structured_log(
                             "kafka_to_postgres",
-                            {"hostname": hostname, "system_id": sys_id,
-                             "events": 0, "status": "db_unavailable", "latency_ms": 0},
+                            {
+                                "operation": "retention_cleanup",
+                                "status": "failed",
+                                "error": str(exc),
+                            },
                             log=logger,
                         )
+                    next_cleanup_at = time.time() + RETENTION_CLEANUP_INTERVAL_SECS
+                continue
+
+            batch_started_at = time.time()
+            batch_messages = 0
+            batch_events = 0
+            batch_failures = 0
+
+            for _topic_partition, messages in records.items():
+                for message in messages:
+                    if shutdown_requested:
+                        break
+
+                    payload = message.value
+                    system_id = payload.get("system_id") or (payload.get("system_info") or {}).get("system_id") or "unknown"
+                    event_count = len(_extract_events_from_payload(payload))
+                    message_started_at = time.time()
+
+                    try:
+                        conn = _get_healthy_conn(conn)
+                    except Exception as exc:
+                        failed_messages += 1
+                        batch_failures += 1
+                        structured_log(
+                            "kafka_to_postgres",
+                            {
+                                "operation": "db_connect",
+                                "status": "failed",
+                                "system_id": system_id,
+                                "event_count": event_count,
+                                "error": str(exc),
+                            },
+                            log=logger,
+                        )
+                        time.sleep(CONSUMER_DB_BACKOFF_SECS)
                         continue
 
-                    # Per-message isolation — one bad message never stops the loop
-                    try:
-                        ok = process_message(conn, payload)
-                    except Exception as msg_exc:
-                        logger.error("[consumer] process_message raised: %s", msg_exc)
-                        ok = False
-
-                    latency_ms   = (time.time() - t0) * 1000
-                    events_count = len(payload.get("events") or [])
-                    status       = "ok" if ok else "failed"
+                    ok = process_message(conn, payload)
+                    latency_ms = round((time.time() - message_started_at) * 1000, 2)
+                    batch_messages += 1
+                    batch_events += event_count
 
                     if ok:
-                        processed += 1
-                        logger.info(
-                            "✓ %s | heartbeat updated | events ingested: %d",
-                            hostname, events_count,
-                        )
+                        processed_messages += 1
+                        processed_events += event_count
                     else:
-                        failed += 1
+                        failed_messages += 1
+                        batch_failures += 1
 
+                    if latency_ms >= CONSUMER_DB_SLOW_MS:
+                        logger.warning(
+                            "DB write for %s was slow (%.2fms) - applying %.1fs backoff",
+                            system_id,
+                            latency_ms,
+                            CONSUMER_DB_BACKOFF_SECS,
+                        )
+                        structured_log(
+                            "kafka_to_postgres",
+                            {
+                                "operation": "consumer_backpressure",
+                                "status": "warning",
+                                "system_id": system_id,
+                                "event_count": event_count,
+                                "db_write_latency_ms": latency_ms,
+                                "backoff_secs": CONSUMER_DB_BACKOFF_SECS,
+                            },
+                            log=logger,
+                        )
+                        time.sleep(CONSUMER_DB_BACKOFF_SECS)
+
+            batch_duration = max(time.time() - batch_started_at, 0.001)
+            batch_events_per_sec = round(batch_events / batch_duration, 2)
+            structured_log(
+                "kafka_to_postgres",
+                {
+                    "operation": "consume_batch",
+                    "status": "ok" if batch_failures == 0 else "partial",
+                    "messages": batch_messages,
+                    "events": batch_events,
+                    "failed_messages": batch_failures,
+                    "batch_latency_ms": round(batch_duration * 1000, 2),
+                    "events_per_sec": batch_events_per_sec,
+                    "kafka_processing_latency_ms": round(batch_duration * 1000, 2),
+                },
+                log=logger,
+            )
+
+            now = time.time()
+            if now >= next_lag_log_at:
+                log_kafka_lag(consumer)
+                next_lag_log_at = now + KAFKA_LAG_LOG_INTERVAL_SECS
+
+            if RETENTION_CLEANUP_ENABLED and now >= next_cleanup_at:
+                try:
+                    conn = _get_healthy_conn(conn)
+                    cleanup_expired_events(conn)
+                except Exception as exc:
                     structured_log(
                         "kafka_to_postgres",
                         {
-                            "hostname":   hostname,
-                            "system_id":  sys_id,
-                            "events":     events_count,
-                            "status":     status,
-                            "latency_ms": round(latency_ms, 2),
+                            "operation": "retention_cleanup",
+                            "status": "failed",
+                            "error": str(exc),
                         },
                         log=logger,
                     )
+                next_cleanup_at = now + RETENTION_CLEANUP_INTERVAL_SECS
 
     except KeyboardInterrupt:
         logger.info("[graceful_shutdown] KeyboardInterrupt received")
 
     finally:
-        logger.info(
-            "[graceful_shutdown] Consumer stopped. processed=%d failed=%d",
-            processed, failed,
+        structured_log(
+            "kafka_to_postgres",
+            {
+                "operation": "shutdown",
+                "status": "ok",
+                "processed_messages": processed_messages,
+                "processed_events": processed_events,
+                "failed_messages": failed_messages,
+            },
+            log=logger,
         )
         try:
             consumer.close()

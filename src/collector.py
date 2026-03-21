@@ -23,7 +23,7 @@ import ctypes
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 from collections import deque
 import winreg
 import uuid
@@ -55,10 +55,16 @@ except ImportError:
     HAS_KAFKA = False
 
 from shared_constants import (
+    COLLECTOR_BASE_BATCH_SIZE,
+    COLLECTOR_DYNAMIC_BATCHING_ENABLED,
+    COLLECTOR_INTERVAL_SECONDS,
+    COLLECTOR_MAX_BATCH_SIZE,
     LEVEL_NAMES,
     CPU_ALERT_THRESHOLD,
     MEMORY_ALERT_THRESHOLD,
     DISK_LOW_THRESHOLD,
+    KAFKA_BOOTSTRAP_SERVERS as SC_KAFKA_BOOTSTRAP_SERVERS,
+    KAFKA_TOPIC as SC_KAFKA_TOPIC,
     RETRY_MAX_ATTEMPTS as _SC_RETRY_MAX,
     RETRY_BACKOFF_SECONDS as _SC_RETRY_BACKOFF,
     CIRCUIT_BREAKER_THRESHOLD,
@@ -95,8 +101,8 @@ def load_config() -> Dict:
     """Load config.json, falling back to built-in defaults."""
     defaults = {
         "kafka": {
-            "bootstrap_servers": "<WSL_IP>:9092",
-            "topic": "sentinel-events",
+            "bootstrap_servers": SC_KAFKA_BOOTSTRAP_SERVERS,
+            "topic": SC_KAFKA_TOPIC,
             "client_id": "windows-test-agent",
             "acks": "all",
             "retries": 5,
@@ -106,7 +112,7 @@ def load_config() -> Dict:
         },
         "agent": {
             "system_id_mode": "AUTO",
-            "batch_size": 20,
+            "batch_size": COLLECTOR_BASE_BATCH_SIZE,
             "retry_attempts": 3,
             "retry_backoff_seconds": 3
         }
@@ -120,6 +126,10 @@ def load_config() -> Dict:
                     defaults[section].update(user_config[section])
             print(f"Loaded config from {CONFIG_FILE}")
         except Exception as e:
+            structured_log(
+                "collector",
+                {"operation": "load_config", "status": "failed", "error": str(e), "config_file": CONFIG_FILE},
+            )
             print(f"Warning: Could not load {CONFIG_FILE}: {e}. Using defaults.", file=sys.stderr)
     else:
         print(f"Warning: {CONFIG_FILE} not found. Using built-in defaults.", file=sys.stderr)
@@ -168,8 +178,8 @@ EXCLUDE_PROVIDER_KEYWORDS = [
     "tcpip", "dns", "dhcp", "wlan", "smb", "network",
     "firewall", "winhttp", "wininet"
 ]
-BATCH_SIZE                  = _CONFIG["agent"]["batch_size"]
-COLLECTION_INTERVAL_SECONDS = 30
+BATCH_SIZE                  = int(os.getenv("SENTINEL_COLLECTOR_QUERY_BATCH_SIZE", str(_CONFIG["agent"]["batch_size"])))
+COLLECTION_INTERVAL_SECONDS = COLLECTOR_INTERVAL_SECONDS
 CHECKPOINT_FILE             = os.path.join(SCRIPT_DIR, "checkpoint.json")
 MAX_RETRY_ATTEMPTS          = _CONFIG["agent"]["retry_attempts"]
 RETRY_BACKOFF_BASE          = float(_CONFIG["agent"]["retry_backoff_seconds"])
@@ -200,6 +210,42 @@ logging.basicConfig(
 logger = logging.getLogger('SentinelCore')
 
 
+def _log_collector_failure(operation: str, error: Any, **extra: Any) -> None:
+    """Emit a structured failure log for collector-side recoverable errors."""
+    payload = {"operation": operation, "status": "failed", "error": str(error)}
+    payload.update(extra)
+    structured_log("collector", payload, log=logger)
+
+
+def structured_log_cycle(
+    cycle: int,
+    duration: float,
+    events_sent: int,
+    status: str,
+    extras: Optional[Dict] = None,
+) -> None:
+    """Emit the collector cycle metrics in a stable JSON shape."""
+    payload = {
+        "cycle": cycle,
+        "duration_s": round(duration, 3),
+        "events_sent": events_sent,
+        "events_per_sec": round(events_sent / duration, 2) if duration > 0 else 0.0,
+        "status": status,
+    }
+    if extras:
+        payload.update(extras)
+    structured_log("collector", payload, log=logger)
+
+
+def resolve_dynamic_batch_size(event_count: int) -> int:
+    """Scale Kafka batch size with load while preserving bounded message size."""
+    if not COLLECTOR_DYNAMIC_BATCHING_ENABLED:
+        return 1
+    if event_count <= COLLECTOR_BASE_BATCH_SIZE:
+        return max(1, COLLECTOR_BASE_BATCH_SIZE)
+    return min(COLLECTOR_MAX_BATCH_SIZE, max(COLLECTOR_BASE_BATCH_SIZE, event_count // 2))
+
+
 def acquire_pid_lock() -> bool:
     if os.path.exists(PID_LOCK_FILE):
         try:
@@ -211,9 +257,9 @@ def acquire_pid_lock() -> bool:
                         print(f"ERROR: Another instance running (PID {old_pid}). Delete {PID_LOCK_FILE} to force restart.", file=sys.stderr)
                         return False
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                    _log_collector_failure("acquire_pid_lock_probe", "process_inspection_failed", pid=old_pid)
         except (ValueError, IOError):
-            pass
+            _log_collector_failure("acquire_pid_lock_read", "stale_or_unreadable_pid_lock", pid_lock_file=PID_LOCK_FILE)
 
     with open(PID_LOCK_FILE, 'w') as f:
         f.write(str(os.getpid()))
@@ -224,8 +270,8 @@ def release_pid_lock():
     try:
         if os.path.exists(PID_LOCK_FILE):
             os.remove(PID_LOCK_FILE)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log_collector_failure("release_pid_lock", exc, pid_lock_file=PID_LOCK_FILE)
 
 
 def check_disk_space() -> bool:
@@ -235,7 +281,8 @@ def check_disk_space() -> bool:
             logger.warning(f"LOW DISK: {free_mb:.0f}MB free (min: {MIN_DISK_FREE_MB}MB). Pausing.")
             return False
         return True
-    except Exception:
+    except Exception as exc:
+        _log_collector_failure("check_disk_space", exc)
         return True
 
 # ============================================================================
@@ -245,7 +292,8 @@ def check_disk_space() -> bool:
 def is_admin() -> bool:
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
+    except Exception as exc:
+        _log_collector_failure("is_admin", exc)
         return False
 
 
@@ -373,6 +421,7 @@ def get_system_id() -> str:
         winreg.CloseKey(key)
         return guid
     except Exception as e:
+        _log_collector_failure("get_system_id", e)
         print(f"Warning: Could not read MachineGuid: {e}", file=sys.stderr)
         return "UNKNOWN"
 
@@ -381,6 +430,7 @@ def get_hostname() -> str:
     try:
         return socket.gethostname()
     except Exception:
+        _log_collector_failure("get_hostname", "socket.gethostname failed")
         return "UNKNOWN"
 
 
@@ -389,6 +439,7 @@ def get_boot_session_id() -> str:
         seed = f"{get_system_id()}-{psutil.boot_time()}"
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
     except Exception:
+        _log_collector_failure("get_boot_session_id", "boot session generation failed")
         return str(uuid.uuid4())
 
 
@@ -400,6 +451,7 @@ def get_os_version() -> str:
         winreg.CloseKey(key)
         return f"{name} (Build {build})"
     except Exception:
+        _log_collector_failure("get_os_version", "registry lookup failed")
         return "Windows (Unknown Version)"
 
 
@@ -407,6 +459,7 @@ def get_uptime_seconds() -> int:
     try:
         return int(time.time() - psutil.boot_time())
     except Exception:
+        _log_collector_failure("get_uptime_seconds", "uptime lookup failed")
         return 0
 
 
@@ -416,6 +469,7 @@ def get_local_ip() -> str:
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
     except Exception:
+        _log_collector_failure("get_local_ip", "udp probe failed")
         ip = "0.0.0.0"
     finally:
         s.close()
@@ -436,6 +490,7 @@ def get_resource_snapshot() -> Dict:
             'disk_free_percent':    round(100.0 - disk.percent, 2)
         }
     except Exception:
+        _log_collector_failure("get_resource_snapshot", "resource snapshot failed")
         return {'cpu_usage_percent': 0.0, 'memory_usage_percent': 0.0, 'disk_free_percent': 0.0}
 
 # ============================================================================
@@ -466,6 +521,7 @@ def extract_event_metadata(xml: str) -> Optional[Dict]:
             'event_message':   find(r'<Message>(.*?)</Message>', ''),
         }
     except Exception as e:
+        _log_collector_failure("extract_event_metadata", e)
         print(f"Warning: Could not parse event metadata: {e}", file=sys.stderr)
         return None
 
@@ -495,6 +551,7 @@ class CheckpointManager:
                     self.checkpoints = json.load(f)
                 print(f"Loaded checkpoints for {len(self.checkpoints)} channels")
             except Exception as e:
+                _log_collector_failure("checkpoint_load", e, checkpoint_file=self.filepath)
                 print(f"Warning: Could not load checkpoint: {e}", file=sys.stderr)
         else:
             print("No checkpoint file found, starting fresh")
@@ -515,7 +572,13 @@ class CheckpointManager:
                 os.fsync(f.fileno())
             os.replace(tmp, self.filepath)
         except Exception as e:
-            print(f"Error saving checkpoint: {e}", file=sys.stderr)
+            _log_collector_failure("checkpoint_save", e, checkpoint_file=self.filepath)
+            try:
+                with open(self.filepath, 'w', encoding='utf-8') as f:
+                    json.dump(self.checkpoints, f, indent=2)
+            except Exception as direct_write_exc:
+                _log_collector_failure("checkpoint_save_direct", direct_write_exc, checkpoint_file=self.filepath)
+                print(f"Error saving checkpoint: {direct_write_exc}", file=sys.stderr)
 
 # ============================================================================
 # LOCAL FILE MANAGER
@@ -534,8 +597,8 @@ class LocalFileManager:
                     self.event_count = len(json.load(f).get('events', []))
                 print(f"Loaded existing output: {self.event_count} events")
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_collector_failure("local_file_init", exc, output_file=self.output_file)
         self._create_file()
 
     def _create_file(self):
@@ -572,6 +635,7 @@ class LocalFileManager:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             return True
         except Exception as e:
+            _log_collector_failure("local_file_save", e, output_file=self.output_file)
             print(f"  ✗ Error saving locally: {e}", file=sys.stderr)
             return False
 
@@ -616,6 +680,12 @@ class KafkaManager:
                 self._reconnect_attempt = 0
                 return
             except Exception as e:
+                _log_collector_failure(
+                    "kafka_connect",
+                    e,
+                    bootstrap_servers=self.bootstrap_servers,
+                    attempt=attempt + 1,
+                )
                 logger.error(f"Kafka connect failed ({attempt + 1}/{MAX_RETRY_ATTEMPTS}): {e}")
                 if attempt < MAX_RETRY_ATTEMPTS - 1:
                     time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
@@ -635,70 +705,113 @@ class KafkaManager:
             self._reconnect_attempt = 0
             return True
         except Exception as e:
+            _log_collector_failure(
+                "kafka_reconnect",
+                e,
+                bootstrap_servers=self.bootstrap_servers,
+                reconnect_attempt=self._reconnect_attempt,
+            )
             logger.error(f"Kafka reconnect failed: {e}")
             self.producer = None
             return False
 
+    def _build_payload_chunks(self, payload: Dict) -> List[Tuple[Dict, int]]:
+        """Split a collector payload into bounded Kafka payloads."""
+        events = payload.get('events', []) or []
+        if not events:
+            heartbeat_only_payload = dict(payload)
+            heartbeat_only_payload['events'] = []
+            return [(heartbeat_only_payload, 0)]
+
+        chunk_size = max(1, resolve_dynamic_batch_size(len(events)))
+        chunks: List[Tuple[Dict, int]] = []
+        for index in range(0, len(events), chunk_size):
+            chunk_events = events[index:index + chunk_size]
+            chunk_payload = dict(payload)
+            chunk_payload['events'] = chunk_events
+            chunks.append((chunk_payload, len(chunk_events)))
+        return chunks
+
     def send_batch(self, payload: Dict) -> Dict:
-        result = {'sent': 0, 'failed': 0, 'success': False}
+        result = {'sent': 0, 'failed': 0, 'success': False, 'chunks': 0}
+
+        if _kafka_cb.allow() and self._ensure_connected():
+            system_id = payload.get('system_id', 'unknown')
+            futures = []
+            for chunk_payload, chunk_event_count in self._build_payload_chunks(payload):
+                def _send_one(message_payload=chunk_payload):
+                    return self.producer.send(self.topic, key=system_id, value=message_payload)
+
+                future_result, ok = retry_with_backoff(
+                    _send_one,
+                    max_attempts=_SC_RETRY_MAX,
+                    label=f"kafka_send/{system_id}"
+                )
+                if ok and future_result is not None:
+                    futures.append((chunk_event_count, future_result))
+                    result['chunks'] += 1
+                else:
+                    result['failed'] += max(1, chunk_event_count)
+
+            for chunk_event_count, future in futures:
+                def _get_future(f=future):
+                    return f.get(timeout=10)
+
+                _, ok = timeout_wrapper(
+                    _get_future,
+                    timeout_secs=12.0,
+                    label=f"kafka_future/{system_id}",
+                )
+                if ok:
+                    result['sent'] += max(1, chunk_event_count)
+                    _kafka_cb.record_success()
+                else:
+                    result['failed'] += max(1, chunk_event_count)
+                    _kafka_cb.record_failure()
+                    logger.error(f"Delivery timeout for batch from {system_id}")
+                    try:
+                        self.producer.flush(timeout=5)
+                    except Exception as flush_exc:
+                        _log_collector_failure("kafka_flush_after_timeout", flush_exc, system_id=system_id)
+
+            result['success'] = result['failed'] == 0
+            structured_log(
+                "collector",
+                {
+                    "operation": "kafka_send_batch",
+                    "system_id": system_id,
+                    "events": len(payload.get('events', []) or []),
+                    "chunks": result['chunks'],
+                    "sent": result['sent'],
+                    "failed": result['failed'],
+                    "status": "ok" if result['success'] else "failed",
+                },
+                log=logger,
+            )
+            return result
 
         # Circuit breaker guard
         if not _kafka_cb.allow():
+            _log_collector_failure(
+                "kafka_send_batch",
+                "circuit_open",
+                system_id=payload.get('system_id', 'unknown'),
+                bootstrap_servers=self.bootstrap_servers,
+            )
             logger.warning("[KafkaManager.send_batch] Circuit OPEN — skipping send")
             result['failed'] = len(payload.get('events', []))
             return result
 
         if not self._ensure_connected():
             _kafka_cb.record_failure()
+            _log_collector_failure(
+                "kafka_send_batch",
+                "producer_unavailable",
+                system_id=payload.get('system_id', 'unknown'),
+                bootstrap_servers=self.bootstrap_servers,
+            )
             result['failed'] = len(payload.get('events', []))
             return result
-
-        system_id = payload.get('system_id', 'unknown')
-        futures = []
-        for event in payload.get('events', []):
-            msg = {
-                'system_id':           system_id,
-                'hostname':            payload.get('hostname'),
-                'collector_version':   payload.get('collector_version'),
-                'timestamp_collected': payload.get('timestamp_collected'),
-                'system_info':         payload.get('system_info', {}),
-                'event':               event
-            }
-
-            def _send_one(m=msg):
-                return self.producer.send(self.topic, key=system_id, value=m)
-
-            future_result, ok = retry_with_backoff(
-                _send_one,
-                max_attempts=_SC_RETRY_MAX,
-                label=f"kafka_send/{event.get('event_hash','?')[:12]}"
-            )
-            if ok and future_result is not None:
-                futures.append((event, future_result))
-            else:
-                result['failed'] += 1
-
-        # Confirm all futures with a per-future timeout
-        for event, future in futures:
-            def _get_future(f=future):
-                return f.get(timeout=10)
-
-            _, ok = timeout_wrapper(_get_future, timeout_secs=12.0,
-                                    label=f"kafka_future/{event.get('event_hash','?')[:12]}")
-            if ok:
-                result['sent'] += 1
-                _kafka_cb.record_success()
-            else:
-                result['failed'] += 1
-                _kafka_cb.record_failure()
-                logger.error(f"Delivery timeout for {event.get('event_hash','?')[:12]}")
-                try:
-                    self.producer.flush(timeout=5)
-                except Exception:
-                    pass
-
-        result['success'] = result['failed'] == 0
-        return result
 
     def close(self):
         if self.producer:
@@ -707,6 +820,7 @@ class KafkaManager:
                 self.producer.close(timeout=10)
                 logger.info("Kafka producer closed")
             except Exception as e:
+                _log_collector_failure("kafka_close", e, bootstrap_servers=self.bootstrap_servers)
                 logger.error(f"Error closing Kafka producer: {e}")
 
 # ============================================================================
@@ -730,8 +844,20 @@ class TransmissionManager:
                 r = self.session.post(self.endpoint, json=payload, timeout=REQUEST_TIMEOUT)
                 if r.status_code in [200, 201, 202]:
                     return True
+                _log_collector_failure(
+                    "https_send_batch",
+                    f"http_{r.status_code}",
+                    endpoint=self.endpoint,
+                    attempt=attempt + 1,
+                )
                 print(f"  ✗ Server returned {r.status_code}: {r.text[:100]}", file=sys.stderr)
             except requests.exceptions.RequestException as e:
+                _log_collector_failure(
+                    "https_send_batch",
+                    e,
+                    endpoint=self.endpoint,
+                    attempt=attempt + 1,
+                )
                 print(f"  ✗ Transmission failed ({attempt + 1}/{MAX_RETRY_ATTEMPTS}): {e}", file=sys.stderr)
             if attempt < MAX_RETRY_ATTEMPTS - 1:
                 time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
@@ -746,6 +872,7 @@ class TransmissionManager:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
             print(f"  ⚠ Saved to fallback: {path}")
         except Exception as e:
+            _log_collector_failure("https_fallback_save", e, fallback_prefix=FALLBACK_FILE_PREFIX)
             print(f"  ✗ Could not save fallback: {e}", file=sys.stderr)
 
 # ============================================================================
@@ -868,7 +995,8 @@ def collect_events_from_channel(channel: str, last_record_id: int) -> List[Dict]
                         if should_exclude_provider(meta['provider_name']):
                             continue
                         events.append({'metadata': meta, 'raw_xml': xml, 'log_channel': channel})
-                    except Exception:
+                    except Exception as exc:
+                        _log_collector_failure("collect_event_item", exc, channel=channel)
                         continue
             except pywintypes.error as e:
                 if e.winerror == 259:  # ERROR_NO_MORE_ITEMS
@@ -876,8 +1004,10 @@ def collect_events_from_channel(channel: str, last_record_id: int) -> List[Dict]
                 raise
     except pywintypes.error as e:
         if e.winerror not in [5, 15001, 15007, 1734]:
+            _log_collector_failure("collect_events_channel", e, channel=channel)
             print(f"Error querying {channel}: {e}", file=sys.stderr)
     except Exception as e:
+        _log_collector_failure("collect_events_channel", e, channel=channel)
         print(f"Unexpected error in {channel}: {e}", file=sys.stderr)
 
     return events
@@ -961,6 +1091,7 @@ def run_collector():
                         if raw_events:
                             logger.info(f"  {channel}: {len(raw_events)} new event(s)")
                     except Exception as ch_exc:
+                        _log_collector_failure("collect_channel", ch_exc, channel=channel)
                         logger.error(f"  Channel {channel} error: {ch_exc}")
                         raw_events = []
 
@@ -1016,6 +1147,7 @@ def run_collector():
                                 'normalized_message': _clean_message(raw_msg).lower(),
                             })
                         except Exception as ev_exc:
+                            _log_collector_failure("process_event", ev_exc, channel=channel)
                             logger.error(f"  Event process error: {ev_exc}")
                             continue
 
@@ -1061,6 +1193,7 @@ def run_collector():
 
         except Exception as cycle_exc:
             # Per-cycle guard: log and CONTINUE — agent must never crash
+            _log_collector_failure("collector_cycle", cycle_exc, cycle=cycle_count)
             logger.error(f"[Cycle {cycle_count}] unhandled error: {cycle_exc}", exc_info=True)
             cycle_status = "error"
 
@@ -1072,6 +1205,7 @@ def run_collector():
                 try:
                     checkpoint_mgr.save()
                 except Exception as ck_exc:
+                    _log_collector_failure("checkpoint_save", ck_exc, cycle=cycle_count)
                     logger.error(f"Checkpoint save failed: {ck_exc}")
 
             duration = time.time() - cycle_start
@@ -1100,12 +1234,12 @@ def run_collector():
     logger.info("[graceful_shutdown] Flushing final state...")
     try:
         checkpoint_mgr.save()
-    except Exception:
-        pass
+    except Exception as exc:
+        _log_collector_failure("shutdown_checkpoint_save", exc)
     try:
         strategy.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        _log_collector_failure("shutdown_strategy_close", exc, strategy=strategy.name)
     release_pid_lock()
     logger.info(f"[graceful_shutdown] Clean exit. Cycles completed: {cycle_count}")
     sys.exit(0)

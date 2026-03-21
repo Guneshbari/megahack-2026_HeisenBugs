@@ -13,10 +13,11 @@ Hardening:
 
 import json
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,7 @@ import psycopg2.extras
 from shared_constants import (
     DB_CONFIG,
     API_RESPONSE_TIMEOUT_SECONDS,
+    API_CACHE_TTL_SECONDS,
     DB_QUERY_TIMEOUT_SECONDS,
     DB_POOL_MIN_CONN,
     DB_POOL_MAX_CONN,
@@ -65,6 +67,20 @@ def _log_req(endpoint: str, latency_ms: float, status: str, count: int = 0) -> N
     )
 
 
+def _log_failure(endpoint: str, operation: str, error: Any) -> None:
+    """Emit a structured failure log for a failed API or DB operation."""
+    structured_log(
+        "api_server",
+        {
+            "endpoint": endpoint,
+            "operation": operation,
+            "status": "failed",
+            "error": str(error),
+        },
+        log=logger,
+    )
+
+
 # ============================================================================
 # APP
 # ============================================================================
@@ -88,7 +104,31 @@ app.add_middleware(
 # ============================================================================
 
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
-_pool_lock = __import__('threading').Lock()
+_pool_lock = threading.Lock()
+
+
+class TimedResponseCache:
+    """Small in-memory TTL cache for hot read endpoints."""
+
+    def __init__(self) -> None:
+        self._entries: Dict[str, Tuple[float, Any]] = {}
+        self._lock = threading.Lock()
+
+    def get_or_set(self, key: str, ttl_seconds: int, loader: Callable[[], Any]) -> Any:
+        """Return a cached value when fresh, otherwise compute and store it."""
+        now = time.time()
+        with self._lock:
+            cached_entry = self._entries.get(key)
+            if cached_entry and cached_entry[0] > now:
+                return cached_entry[1]
+
+        value = loader()
+        with self._lock:
+            self._entries[key] = (now + ttl_seconds, value)
+        return value
+
+
+_response_cache = TimedResponseCache()
 
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
@@ -148,6 +188,8 @@ def _exec_query(sql: str, params: Any = None, endpoint: str = "query") -> List[D
 
     def _with_retry() -> List[Dict]:
         result, ok = retry_with_backoff(_run, label=endpoint)
+        if not ok:
+            _log_failure(endpoint, "query_retry", "retries exhausted")
         return result if (ok and result is not None) else []
 
     result, ok = timeout_wrapper(
@@ -155,6 +197,8 @@ def _exec_query(sql: str, params: Any = None, endpoint: str = "query") -> List[D
         timeout_secs=float(_TOTAL_TIMEOUT),
         label=endpoint,
     )
+    if not ok or result is None:
+        _log_failure(endpoint, "query_timeout", "query returned no result before timeout")
     return result if (ok and result is not None) else []
 
 
@@ -172,6 +216,8 @@ def _exec_one(sql: str, params: Any = None, endpoint: str = "query") -> Dict:
 
     def _with_retry() -> Dict:
         result, ok = retry_with_backoff(_run, label=endpoint)
+        if not ok:
+            _log_failure(endpoint, "query_retry", "retries exhausted")
         return result if (ok and result is not None) else {}
 
     result, ok = timeout_wrapper(
@@ -179,10 +225,13 @@ def _exec_one(sql: str, params: Any = None, endpoint: str = "query") -> Dict:
         timeout_secs=float(_TOTAL_TIMEOUT),
         label=endpoint,
     )
+    if not ok or result is None:
+        _log_failure(endpoint, "query_timeout", "query returned no result before timeout")
     return result if (ok and result is not None) else {}
 
 
 def _parse_diag(raw: Any):
+    """Parse diagnostic JSON and extract the best human-readable description."""
     diag = raw
     if isinstance(diag, str):
         try:
@@ -200,21 +249,36 @@ def _parse_diag(raw: Any):
 
 
 def _iso(val: Any) -> Any:
+    """Convert datetimes to ISO strings without mutating other values."""
     return val.isoformat() if isinstance(val, datetime) else val
 
 
-def _f(val: Any, fallback: float = 0.0) -> float:
+def _coerce_float(val: Any, fallback: float = 0.0) -> float:
+    """Coerce values to float for stable API output types."""
     try:
         return float(val) if val is not None else fallback
     except (TypeError, ValueError):
         return fallback
 
 
-def _i(val: Any, fallback: int = 0) -> int:
+def _coerce_int(val: Any, fallback: int = 0) -> int:
+    """Coerce values to int for stable API output types."""
     try:
         return int(val) if val is not None else fallback
     except (TypeError, ValueError):
         return fallback
+
+
+_f = _coerce_float
+_i = _coerce_int
+
+
+def _cache_key(endpoint: str, **params: Any) -> str:
+    """Build a deterministic cache key from an endpoint and parameters."""
+    parts = [endpoint]
+    for key in sorted(params):
+        parts.append(f"{key}={params[key]}")
+    return "|".join(parts)
 
 
 # ============================================================================
@@ -259,6 +323,7 @@ def get_events(limit: int = 100) -> List[Dict]:
 
     except Exception as exc:
         logger.error("/events error: %s", exc)
+        _log_failure("/events", "endpoint", exc)
         _log_req("/events", (time.time() - t0) * 1000, "error")
         return []
 
@@ -267,67 +332,76 @@ def get_events(limit: int = 100) -> List[Dict]:
 def get_systems() -> List[Dict]:
     t0 = time.time()
     try:
-        rows = _exec_query("""
-            WITH counts AS (
-                SELECT system_id, COUNT(*) AS total_events
-                FROM events
-                GROUP BY system_id
-            ),
-            critical_counts AS (
-                SELECT system_id, COUNT(*) AS critical_count
-                FROM events
-                WHERE severity = 'CRITICAL'
-                  AND ingested_at > NOW() - INTERVAL '1 hour'
-                GROUP BY system_id
-            )
-            SELECT
-                h.system_id, h.hostname,
-                h.cpu_usage_percent, h.memory_usage_percent, h.disk_free_percent,
-                h.os_version, h.last_seen,
-                COALESCE(c.total_events, 0)    AS total_events,
-                COALESCE(cc.critical_count, 0) AS critical_count
-            FROM system_heartbeats h
-            LEFT JOIN counts          c  ON c.system_id  = h.system_id
-            LEFT JOIN critical_counts cc ON cc.system_id = h.system_id
-            ORDER BY h.system_id
-        """, endpoint="/systems")
+        def load_systems() -> List[Dict]:
+            rows = _exec_query("""
+                WITH counts AS (
+                    SELECT system_id, COUNT(*) AS total_events
+                    FROM events
+                    GROUP BY system_id
+                ),
+                critical_counts AS (
+                    SELECT system_id, COUNT(*) AS critical_count
+                    FROM events
+                    WHERE severity = 'CRITICAL'
+                      AND ingested_at > NOW() - INTERVAL '1 hour'
+                    GROUP BY system_id
+                )
+                SELECT
+                    h.system_id, h.hostname,
+                    h.cpu_usage_percent, h.memory_usage_percent, h.disk_free_percent,
+                    h.os_version, h.last_seen,
+                    COALESCE(c.total_events, 0)    AS total_events,
+                    COALESCE(cc.critical_count, 0) AS critical_count
+                FROM system_heartbeats h
+                LEFT JOIN counts          c  ON c.system_id  = h.system_id
+                LEFT JOIN critical_counts cc ON cc.system_id = h.system_id
+                ORDER BY h.system_id
+            """, endpoint="/systems")
 
-        systems: List[Dict] = []
-        for row in rows:
-            crit   = _i(row.get("critical_count"))
-            cpu    = _f(row.get("cpu_usage_percent"))
-            mem    = _f(row.get("memory_usage_percent"))
-            disk   = _f(row.get("disk_free_percent"))
-            status = "degraded" if (crit >= 3 or cpu > 90 or mem > 95) else "online"
+            systems: List[Dict] = []
+            for row in rows:
+                crit = _i(row.get("critical_count"))
+                cpu = _f(row.get("cpu_usage_percent"))
+                mem = _f(row.get("memory_usage_percent"))
+                disk = _f(row.get("disk_free_percent"))
+                status = "degraded" if (crit >= 3 or cpu > 90 or mem > 95) else "online"
 
-            last_seen = row.get("last_seen")
-            if isinstance(last_seen, datetime):
-                diff = (
-                    datetime.now(timezone.utc) -
-                    last_seen.replace(tzinfo=timezone.utc)
-                ).total_seconds()
-                if diff > 120:
-                    status = "offline"
-                last_seen = last_seen.isoformat()
+                last_seen = row.get("last_seen")
+                if isinstance(last_seen, datetime):
+                    diff = (
+                        datetime.now(timezone.utc) -
+                        last_seen.replace(tzinfo=timezone.utc)
+                    ).total_seconds()
+                    if diff > 120:
+                        status = "offline"
+                    last_seen = last_seen.isoformat()
 
-            systems.append({
-                "system_id":            row["system_id"],
-                "hostname":             row.get("hostname", ""),
-                "status":               status,
-                "cpu_usage_percent":    cpu,
-                "memory_usage_percent": mem,
-                "disk_free_percent":    disk,
-                "os_version":           row.get("os_version", "Windows"),
-                "last_seen":            last_seen,
-                "ip_address":           "",
-                "total_events":         _i(row.get("total_events")),
-            })
+                systems.append({
+                    "system_id":            row["system_id"],
+                    "hostname":             row.get("hostname", ""),
+                    "status":               status,
+                    "cpu_usage_percent":    cpu,
+                    "memory_usage_percent": mem,
+                    "disk_free_percent":    disk,
+                    "os_version":           row.get("os_version", "Windows"),
+                    "last_seen":            last_seen,
+                    "ip_address":           "",
+                    "total_events":         _i(row.get("total_events")),
+                })
+            return systems
+
+        systems = _response_cache.get_or_set(
+            _cache_key("/systems"),
+            API_CACHE_TTL_SECONDS,
+            load_systems,
+        )
 
         _log_req("/systems", (time.time() - t0) * 1000, "ok", len(systems))
         return systems
 
     except Exception as exc:
         logger.error("/systems error: %s", exc)
+        _log_failure("/systems", "endpoint", exc)
         _log_req("/systems", (time.time() - t0) * 1000, "error")
         return []
 
@@ -370,6 +444,7 @@ def get_alerts() -> List[Dict]:
 
     except Exception as exc:
         logger.error("/alerts error: %s", exc)
+        _log_failure("/alerts", "endpoint", exc)
         _log_req("/alerts", (time.time() - t0) * 1000, "error")
         return []
 
@@ -379,58 +454,66 @@ def get_metrics() -> List[Dict]:
     """Time-bucketed metric points. Falls back to feature_snapshots if no recent events."""
     t0 = time.time()
     try:
-        rows = _exec_query("""
-            SELECT
-                date_trunc('hour', ingested_at)                             AS bucket,
-                COUNT(*)                                                     AS event_count,
-                COUNT(*) FILTER (WHERE severity = 'CRITICAL')               AS critical_count,
-                COUNT(*) FILTER (WHERE severity = 'ERROR')                  AS error_count,
-                COUNT(*) FILTER (WHERE severity = 'WARNING')                AS warning_count,
-                COUNT(*) FILTER (WHERE severity = 'INFO')                   AS info_count,
-                ROUND(AVG(cpu_usage_percent)::numeric, 1)                   AS avg_cpu,
-                ROUND(AVG(memory_usage_percent)::numeric, 1)                AS avg_memory,
-                ROUND(AVG(disk_free_percent)::numeric, 1)                   AS avg_disk_free
-            FROM events
-            WHERE ingested_at > NOW() - INTERVAL '24 hours'
-            GROUP BY bucket
-            ORDER BY bucket ASC
-        """, endpoint="/metrics")
-
-        if not rows:
+        def load_metrics() -> List[Dict]:
             rows = _exec_query("""
                 SELECT
-                    date_trunc('hour', snapshot_time)       AS bucket,
-                    SUM(total_events)                        AS event_count,
-                    SUM(critical_count)                      AS critical_count,
-                    SUM(error_count)                         AS error_count,
-                    SUM(warning_count)                       AS warning_count,
-                    SUM(info_count)                          AS info_count,
-                    ROUND(AVG(cpu_usage_percent), 1)         AS avg_cpu,
-                    ROUND(AVG(memory_usage_percent), 1)      AS avg_memory,
-                    ROUND(AVG(disk_free_percent), 1)         AS avg_disk_free
-                FROM feature_snapshots
-                WHERE snapshot_time > NOW() - INTERVAL '24 hours'
+                    date_trunc('hour', ingested_at)                             AS bucket,
+                    COUNT(*)                                                     AS event_count,
+                    COUNT(*) FILTER (WHERE severity = 'CRITICAL')               AS critical_count,
+                    COUNT(*) FILTER (WHERE severity = 'ERROR')                  AS error_count,
+                    COUNT(*) FILTER (WHERE severity = 'WARNING')                AS warning_count,
+                    COUNT(*) FILTER (WHERE severity = 'INFO')                   AS info_count,
+                    ROUND(AVG(cpu_usage_percent)::numeric, 1)                   AS avg_cpu,
+                    ROUND(AVG(memory_usage_percent)::numeric, 1)                AS avg_memory,
+                    ROUND(AVG(disk_free_percent)::numeric, 1)                   AS avg_disk_free
+                FROM events
+                WHERE ingested_at > NOW() - INTERVAL '24 hours'
                 GROUP BY bucket
                 ORDER BY bucket ASC
-            """, endpoint="/metrics_fallback")
+            """, endpoint="/metrics")
 
-        metrics = [{
-            "timestamp":      _iso(r.get("bucket")),
-            "event_count":    _i(r.get("event_count")),
-            "critical_count": _i(r.get("critical_count")),
-            "error_count":    _i(r.get("error_count")),
-            "warning_count":  _i(r.get("warning_count")),
-            "info_count":     _i(r.get("info_count")),
-            "avg_cpu":        _f(r.get("avg_cpu")),
-            "avg_memory":     _f(r.get("avg_memory")),
-            "avg_disk_free":  _f(r.get("avg_disk_free")),
-        } for r in rows]
+            if not rows:
+                rows = _exec_query("""
+                    SELECT
+                        date_trunc('hour', snapshot_time)       AS bucket,
+                        SUM(total_events)                        AS event_count,
+                        SUM(critical_count)                      AS critical_count,
+                        SUM(error_count)                         AS error_count,
+                        SUM(warning_count)                       AS warning_count,
+                        SUM(info_count)                          AS info_count,
+                        ROUND(AVG(cpu_usage_percent), 1)         AS avg_cpu,
+                        ROUND(AVG(memory_usage_percent), 1)      AS avg_memory,
+                        ROUND(AVG(disk_free_percent), 1)         AS avg_disk_free
+                    FROM feature_snapshots
+                    WHERE snapshot_time > NOW() - INTERVAL '24 hours'
+                    GROUP BY bucket
+                    ORDER BY bucket ASC
+                """, endpoint="/metrics_fallback")
+
+            return [{
+                "timestamp":      _iso(r.get("bucket")),
+                "event_count":    _i(r.get("event_count")),
+                "critical_count": _i(r.get("critical_count")),
+                "error_count":    _i(r.get("error_count")),
+                "warning_count":  _i(r.get("warning_count")),
+                "info_count":     _i(r.get("info_count")),
+                "avg_cpu":        _f(r.get("avg_cpu")),
+                "avg_memory":     _f(r.get("avg_memory")),
+                "avg_disk_free":  _f(r.get("avg_disk_free")),
+            } for r in rows]
+
+        metrics = _response_cache.get_or_set(
+            _cache_key("/metrics"),
+            API_CACHE_TTL_SECONDS,
+            load_metrics,
+        )
 
         _log_req("/metrics", (time.time() - t0) * 1000, "ok", len(metrics))
         return metrics
 
     except Exception as exc:
         logger.error("/metrics error: %s", exc)
+        _log_failure("/metrics", "endpoint", exc)
         _log_req("/metrics", (time.time() - t0) * 1000, "error")
         return []
 
@@ -441,35 +524,43 @@ def get_dashboard_metrics() -> Dict:
     t0      = time.time()
     default = {"total_events": 0, "critical_events": 0, "warning_events": 0}
     try:
-        row = _exec_one("""
-            SELECT
-                COUNT(*)                                       AS total_events,
-                COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS critical_events,
-                COUNT(*) FILTER (WHERE severity = 'WARNING')  AS warning_events
-            FROM events
-        """, endpoint="/dashboard-metrics")
-
-        if not row or _i(row.get("total_events")) == 0:
-            snap = _exec_one("""
+        def load_dashboard_metrics() -> Dict:
+            row = _exec_one("""
                 SELECT
-                    SUM(total_events)   AS total_events,
-                    SUM(critical_count) AS critical_events,
-                    SUM(warning_count)  AS warning_events
-                FROM feature_snapshots
-            """, endpoint="/dashboard-metrics_snap")
-            if snap:
-                row = snap
+                    COUNT(*)                                       AS total_events,
+                    COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS critical_events,
+                    COUNT(*) FILTER (WHERE severity = 'WARNING')  AS warning_events
+                FROM events
+            """, endpoint="/dashboard-metrics")
 
-        result = {
-            "total_events":    _i(row.get("total_events")),
-            "critical_events": _i(row.get("critical_events")),
-            "warning_events":  _i(row.get("warning_events")),
-        }
+            if not row or _i(row.get("total_events")) == 0:
+                snap = _exec_one("""
+                    SELECT
+                        SUM(total_events)   AS total_events,
+                        SUM(critical_count) AS critical_events,
+                        SUM(warning_count)  AS warning_events
+                    FROM feature_snapshots
+                """, endpoint="/dashboard-metrics_snap")
+                if snap:
+                    row = snap
+
+            return {
+                "total_events":    _i(row.get("total_events")),
+                "critical_events": _i(row.get("critical_events")),
+                "warning_events":  _i(row.get("warning_events")),
+            }
+
+        result = _response_cache.get_or_set(
+            _cache_key("/dashboard-metrics"),
+            API_CACHE_TTL_SECONDS,
+            load_dashboard_metrics,
+        )
         _log_req("/dashboard-metrics", (time.time() - t0) * 1000, "ok")
         return result
 
     except Exception as exc:
         logger.error("/dashboard-metrics error: %s", exc)
+        _log_failure("/dashboard-metrics", "endpoint", exc)
         _log_req("/dashboard-metrics", (time.time() - t0) * 1000, "error")
         return default
 
@@ -487,6 +578,7 @@ def get_fault_distribution() -> List[Dict]:
         return rows
     except Exception as exc:
         logger.error("/fault-distribution error: %s", exc)
+        _log_failure("/fault-distribution", "endpoint", exc)
         return []
 
 
@@ -502,6 +594,7 @@ def get_severity_distribution() -> List[Dict]:
         return rows
     except Exception as exc:
         logger.error("/severity-distribution error: %s", exc)
+        _log_failure("/severity-distribution", "endpoint", exc)
         return []
 
 
@@ -522,6 +615,7 @@ def get_system_metrics() -> Dict:
         return result
     except Exception as exc:
         logger.error("/system-metrics error: %s", exc)
+        _log_failure("/system-metrics", "endpoint", exc)
         return default
 
 
@@ -608,6 +702,7 @@ def get_pipeline_health() -> Dict:
 
     except Exception as exc:
         logger.error("/pipeline-health error: %s", exc)
+        _log_failure("/pipeline-health", "endpoint", exc)
         _log_req("/pipeline-health", (time.time() - t0) * 1000, "error")
         return default
 
@@ -649,6 +744,7 @@ def get_feature_snapshots(
 
     except Exception as exc:
         logger.error("/feature-snapshots error: %s", exc)
+        _log_failure("/feature-snapshots", "endpoint", exc)
         _log_req("/feature-snapshots", (time.time() - t0) * 1000, "error")
         return []
 
@@ -697,6 +793,7 @@ def get_live_status() -> List[Dict]:
 
     except Exception as exc:
         logger.error("/live-status error: %s", exc)
+        _log_failure("/live-status", "endpoint", exc)
         _log_req("/live-status", (time.time() - t0) * 1000, "error")
         return []
 
@@ -768,6 +865,7 @@ def prometheus_metrics() -> PlainTextResponse:
 
     except Exception as exc:
         logger.error("/metrics-export error: %s", exc)
+        _log_failure("/metrics-export", "endpoint", exc)
         return PlainTextResponse(
             "# error generating metrics\n",
             media_type="text/plain; version=0.0.4",
@@ -782,5 +880,6 @@ def health_check() -> Dict:
         _log_req("/health", (time.time() - t0) * 1000, "ok")
         return {"status": "healthy", "database": "connected"}
     except Exception as exc:
+        _log_failure("/health", "endpoint", exc)
         _log_req("/health", (time.time() - t0) * 1000, "error")
         return {"status": "degraded", "database": str(exc)}

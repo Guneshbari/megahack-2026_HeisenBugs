@@ -1245,7 +1245,8 @@ class TestCollectorCleanMessage(unittest.TestCase):
 class TestCheckpointManager(unittest.TestCase):
 
     def setUp(self):
-        self.tmpdir  = tempfile.mkdtemp()
+        self.tmpdir  = os.path.join(_PROJECT_ROOT, f"ckpt_{time.time_ns()}")
+        os.mkdir(self.tmpdir)
         self.ck_path = os.path.join(self.tmpdir, "checkpoint.json")
 
     def tearDown(self):
