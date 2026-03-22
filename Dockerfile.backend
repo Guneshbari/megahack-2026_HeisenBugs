@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # We copy requirements.txt to leverage Docker cache for dependencies.
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt || true
+RUN pip install --no-cache-dir -r requirements.txt
 # Provide essential deps individually to ensure they are available even if requirements.txt misses them
 RUN pip install --no-cache-dir uvicorn fastapi psycopg2-binary kafka-python-ng requests psutil
 

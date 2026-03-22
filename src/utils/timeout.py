@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Any, Callable, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import Any, Callable, Tuple
 
 from shared_constants import DB_QUERY_TIMEOUT_SECONDS
 
 logger = logging.getLogger("sentinel_utils.timeout")
-
 
 def timeout_wrapper(
     fn: Callable,
@@ -19,33 +18,23 @@ def timeout_wrapper(
     **kwargs: Any,
 ) -> Tuple[Any, bool]:
     """
-    Run ``fn`` in a daemon thread.
+    Run ``fn`` with a strict timeout using ThreadPoolExecutor.
 
     Returns ``(result, True)`` if the call finishes before ``timeout_secs``,
-    or ``(None, False)`` on timeout.
+    or ``(None, False)`` on timeout. Will cancel the future if it times out.
     """
-    result_box: List[Any] = [None]
-    exception_box: List[Optional[Exception]] = [None]
-
-    def run_target() -> None:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn, *args, **kwargs)
         try:
-            result_box[0] = fn(*args, **kwargs)
+            result = future.result(timeout=timeout_secs)
+            return result, True
+        except TimeoutError:
+            logger.error(
+                "[timeout_wrapper] %s exceeded %.1fs - returning fallback",
+                label,
+                timeout_secs,
+            )
+            future.cancel()
+            return None, False
         except Exception as exc:
-            exception_box[0] = exc
-
-    worker_thread = threading.Thread(target=run_target, daemon=True)
-    worker_thread.start()
-    worker_thread.join(timeout=timeout_secs)
-
-    if worker_thread.is_alive():
-        logger.error(
-            "[timeout_wrapper] %s exceeded %.1fs - returning fallback",
-            label,
-            timeout_secs,
-        )
-        return None, False
-
-    if exception_box[0] is not None:
-        raise exception_box[0]
-
-    return result_box[0], True
+            raise exc

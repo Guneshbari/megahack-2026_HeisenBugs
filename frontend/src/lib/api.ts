@@ -15,7 +15,7 @@ import type {
 } from '../types/telemetry';
 
 const configuredApiBase = import.meta.env.VITE_SENTINEL_API_BASE_URL?.trim();
-const API_BASE = (configuredApiBase || 'http://172.30.178.75:8080').replace(/\/+$/, '');
+const API_BASE = (configuredApiBase || 'http://localhost:8080').replace(/\/+$/, '');
 const configuredApiBearerToken = import.meta.env.VITE_SENTINEL_API_BEARER_TOKEN?.trim() || null;
 export const RECENT_EVENTS_LIMIT = Number.parseInt(
   import.meta.env.VITE_SENTINEL_RECENT_EVENTS_LIMIT ?? '1000',

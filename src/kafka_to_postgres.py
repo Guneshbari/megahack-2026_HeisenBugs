@@ -242,14 +242,12 @@ def _ensure_partition_shadow_tables(cur: Any) -> None:
         partition_start = _shift_month(start_month, month_offset)
         partition_end = _shift_month(partition_start, 1)
         partition_name = f"events_partitioned_{partition_start.strftime('%Y%m')}"
-        cur.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {partition_name}
+        query = pgsql.SQL("""
+            CREATE TABLE IF NOT EXISTS {partition_table}
             PARTITION OF events_partitioned
             FOR VALUES FROM (%s) TO (%s);
-            """,
-            (partition_start, partition_end),
-        )
+        """).format(partition_table=pgsql.Identifier(partition_name))
+        cur.execute(query, (partition_start, partition_end))
 
 
 def setup_database(conn: Any) -> None:
@@ -304,12 +302,15 @@ def setup_database(conn: Any) -> None:
             ("escalated_at", "TIMESTAMP WITH TIME ZONE", "NULL"),
             ("assigned_to", "VARCHAR(100)", "NULL"),
         ]:
-            cur.execute(
-                f"""
+            query = pgsql.SQL("""
                 ALTER TABLE events
-                ADD COLUMN IF NOT EXISTS {column_name} {column_type} DEFAULT {default_value};
-                """
+                ADD COLUMN IF NOT EXISTS {col} {type} DEFAULT {default};
+            """).format(
+                col=pgsql.Identifier(column_name),
+                type=pgsql.SQL(column_type),
+                default=pgsql.SQL(default_value)
             )
+            cur.execute(query)
 
         cur.execute(
             """

@@ -246,7 +246,23 @@ def resolve_dynamic_batch_size(event_count: int) -> int:
     return min(COLLECTOR_MAX_BATCH_SIZE, max(COLLECTOR_BASE_BATCH_SIZE, event_count // 2))
 
 
+_app_mutex_handle = None
+
 def acquire_pid_lock() -> bool:
+    global _app_mutex_handle
+    if os.name == 'nt':
+        try:
+            import ctypes
+            mutex_name = "Global\\SentinelCoreCollectorMutex"
+            handle = ctypes.windll.kernel32.CreateMutexW(None, True, mutex_name)
+            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                print("ERROR: Another instance running (Mutex held).", file=sys.stderr)
+                return False
+            _app_mutex_handle = handle
+            return True
+        except Exception as exc:
+            _log_collector_failure("acquire_pid_lock_mutex", exc)
+
     if os.path.exists(PID_LOCK_FILE):
         try:
             with open(PID_LOCK_FILE, 'r') as f:
@@ -754,15 +770,14 @@ class KafkaManager:
                     result['failed'] += max(1, chunk_event_count)
 
             for chunk_event_count, future in futures:
-                def on_success(meta):
+                try:
+                    future.get(timeout=15.0)
                     _kafka_cb.record_success()
-
-                def on_error(exc):
+                    result['sent'] += max(1, chunk_event_count)
+                except Exception as exc:
                     _kafka_cb.record_failure()
-                    logger.error(f"Kafka async delivery failed: {exc}")
-
-                future.add_callback(on_success).add_errback(on_error)
-                result['sent'] += max(1, chunk_event_count)
+                    logger.error(f"Kafka sync delivery failed: {exc}")
+                    result['failed'] += max(1, chunk_event_count)
 
             result['success'] = result['failed'] == 0
             structured_log(

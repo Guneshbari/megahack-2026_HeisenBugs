@@ -13,23 +13,31 @@ Hardening:
 
 import json
 import logging
-import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
+import psycopg2.sql as pgsql
+
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth, credentials as firebase_credentials
+    _FIREBASE_ADMIN_AVAILABLE = True
+except ImportError:
+    _FIREBASE_ADMIN_AVAILABLE = False
 
 from shared_constants import (
     DB_CONFIG,
-    API_BEARER_TOKEN,
+    FIREBASE_AUTH_ENABLED,
     API_RESPONSE_TIMEOUT_SECONDS,
     API_CACHE_TTL_SECONDS,
     API_CORS_ALLOWED_ORIGINS,
@@ -86,13 +94,63 @@ def _log_failure(endpoint: str, operation: str, error: Any) -> None:
 
 
 # ============================================================================
+# FIREBASE ADMIN SDK INITIALISATION
+# ============================================================================
+
+def _init_firebase_admin() -> bool:
+    """Initialise Firebase Admin SDK from a service account file or environment."""
+    import os
+    if not _FIREBASE_ADMIN_AVAILABLE:
+        return False
+    try:
+        if firebase_admin._apps:  # already initialised
+            return True
+        sa_path = os.getenv("SENTINEL_FIREBASE_SERVICE_ACCOUNT_PATH", "")
+        if sa_path:
+            cred = firebase_credentials.Certificate(sa_path)
+        else:
+            # Fall back to Application Default Credentials (GCP / Cloud Run)
+            cred = firebase_credentials.ApplicationDefault()
+        firebase_admin.initialize_app(cred)
+        return True
+    except Exception as exc:
+        logger.error("Firebase Admin SDK init failed: %s", exc)
+        return False
+
+
+_FIREBASE_ADMIN_READY = False
+
+
+# ============================================================================
 # APP
 # ============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: initialise on startup, tear down on shutdown."""
+    global _pool, _FIREBASE_ADMIN_READY
+    _FIREBASE_ADMIN_READY = _init_firebase_admin()
+    if FIREBASE_AUTH_ENABLED:
+        if _FIREBASE_ADMIN_READY:
+            logger.info("[startup] Firebase Admin SDK ready — token verification enabled")
+        else:
+            logger.error(
+                "[startup] Firebase Admin SDK unavailable — set SENTINEL_FIREBASE_SERVICE_ACCOUNT_PATH "
+                "or install firebase-admin.  Auth is DISABLED."
+            )
+    _log_security_posture()
+    yield
+    # Shutdown
+    if _pool:
+        _pool.closeall()
+        _pool = None
+
 
 app = FastAPI(
     title="SentinelCore API",
     description="Live telemetry data API for the SentinelCore dashboard",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -114,9 +172,10 @@ _pool_lock = threading.Lock()
 class TimedResponseCache:
     """Small in-memory TTL cache for hot read endpoints."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_size: int = 1000) -> None:
         self._entries: Dict[str, Tuple[float, Any]] = {}
         self._inflight: Dict[str, threading.Event] = {}
+        self._max_size = max_size
         self._lock = threading.Lock()
 
     def get_or_set(self, key: str, ttl_seconds: int, loader: Callable[[], Any]) -> Any:
@@ -150,6 +209,16 @@ class TimedResponseCache:
                     raise
 
                 with self._lock:
+                    if len(self._entries) >= self._max_size:
+                        now = time.time()
+                        expired = [k for k, v in self._entries.items() if v[0] <= now]
+                        for k in expired:
+                            del self._entries[k]
+                        if len(self._entries) >= self._max_size:
+                            # Evict key with earliest expiry
+                            oldest = min(self._entries.keys(), key=lambda k: self._entries[k][0])
+                            del self._entries[oldest]
+
                     self._entries[key] = (time.time() + ttl_seconds, value)
                     self._inflight.pop(key, None)
                     inflight_event.set()
@@ -199,29 +268,49 @@ def _get_db() -> Iterator[Any]:
             pool.putconn(conn)
 
 
-@app.on_event("shutdown")
-def _on_shutdown() -> None:
-    global _pool
-    if _pool:
-        _pool.closeall()
-        _pool = None
-
-
 @app.middleware("http")
 async def _security_middleware(request: Request, call_next: Callable[..., Any]) -> Any:
-    """Apply optional auth checks and baseline response headers."""
-    if API_BEARER_TOKEN:
-        provided_token = request.headers.get("Authorization", "")
-        expected_token = f"Bearer {API_BEARER_TOKEN}"
-        if not secrets.compare_digest(provided_token, expected_token):
-            _log_failure(request.url.path, "auth", "invalid_or_missing_bearer_token")
+    """Firebase ID token verification + baseline security response headers."""
+    # Health endpoint is always public (used by load balancers)
+    if request.url.path == "/health":
+        response = await call_next(request)
+        _add_security_headers(response)
+        return response
+
+    if FIREBASE_AUTH_ENABLED:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            _log_failure(request.url.path, "auth", "missing_bearer_token")
+            return PlainTextResponse("Unauthorized", status_code=401)
+
+        id_token = auth_header.split(" ", 1)[1]
+        if not _FIREBASE_ADMIN_READY:
+            # SDK failed to initialise — fail secure
+            _log_failure(request.url.path, "auth", "firebase_sdk_not_ready")
+            return PlainTextResponse("Service unavailable: auth backend not ready", status_code=503)
+
+        try:
+            firebase_auth.verify_id_token(id_token, check_revoked=True)
+        except firebase_auth.RevokedIdTokenError:
+            _log_failure(request.url.path, "auth", "revoked_token")
+            return PlainTextResponse("Unauthorized: token revoked", status_code=401)
+        except firebase_auth.ExpiredIdTokenError:
+            _log_failure(request.url.path, "auth", "expired_token")
+            return PlainTextResponse("Unauthorized: token expired", status_code=401)
+        except Exception as exc:
+            _log_failure(request.url.path, "auth", str(exc))
             return PlainTextResponse("Unauthorized", status_code=401)
 
     response = await call_next(request)
+    _add_security_headers(response)
+    return response
+
+
+def _add_security_headers(response: Any) -> None:
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
-    return response
+    response.headers.setdefault("X-XSS-Protection", "1; mode=block")
 
 
 # ============================================================================
@@ -348,14 +437,11 @@ def _log_security_posture() -> None:
     if API_CORS_ALLOWED_ORIGINS == ["*"]:
         _log_failure("/startup", "security_posture", "wildcard_cors_origins_enabled")
 
-    if DB_CONFIG.get("password") == "changeme123":
-        _log_failure("/startup", "security_posture", "default_database_password_in_use")
+    if DB_CONFIG.get("password", "") in ("", "changeme123"):
+        _log_failure("/startup", "security_posture", "weak_or_default_database_password_in_use")
 
-    if not API_BEARER_TOKEN:
-        _log_failure("/startup", "security_posture", "api_bearer_token_not_configured")
-
-
-_log_security_posture()
+    if not FIREBASE_AUTH_ENABLED:
+        _log_failure("/startup", "security_posture", "firebase_auth_disabled_all_endpoints_public")
 
 
 # ============================================================================
@@ -363,7 +449,7 @@ _log_security_posture()
 # ============================================================================
 
 @app.get("/events")
-def get_events(limit: int = 100, include_raw_xml: bool = True) -> List[Dict]:
+def get_events(limit: int = 100, include_raw_xml: bool = False) -> List[Dict]:
     t0 = time.time()
     try:
         limit = _bounded_limit(limit)
@@ -681,21 +767,23 @@ def get_dashboard_metrics(window_minutes: Optional[int] = None) -> Dict:
     default = {"total_events": 0, "critical_events": 0, "warning_events": 0}
     try:
         def load_dashboard_metrics() -> Dict:
-            where_clause = ""
             params: List = []
             if window_minutes and window_minutes > 0:
-                where_clause = (
-                    "WHERE ingested_at >= NOW() - (%s * INTERVAL '1 minute')"
-                )
+                time_filter = pgsql.SQL("WHERE ingested_at >= NOW() - (%s * INTERVAL '1 minute')")
                 params.append(window_minutes)
-            row = _exec_one("""
+            else:
+                time_filter = pgsql.SQL("")
+
+            query = pgsql.SQL("""
                 SELECT
                     COUNT(*)                                       AS total_events,
                     COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS critical_events,
                     COUNT(*) FILTER (WHERE severity = 'WARNING')  AS warning_events
                 FROM events
-                {where_clause}
-            """.format(where_clause=where_clause), tuple(params), endpoint="/dashboard-metrics")
+                {time_filter}
+            """).format(time_filter=time_filter)
+
+            row = _exec_one(query, tuple(params), endpoint="/dashboard-metrics")
 
             if not row or _i(row.get("total_events")) == 0:
                 snap = _exec_one("""
@@ -733,22 +821,19 @@ def get_dashboard_metrics(window_minutes: Optional[int] = None) -> Dict:
 def get_fault_distribution(window_minutes: Optional[int] = None) -> List[Dict]:
     t0 = time.time()
     try:
-        where_clause = ""
         params: List = []
         if window_minutes and window_minutes > 0:
-            where_clause = (
-                "WHERE ingested_at >= NOW() - (%s * INTERVAL '1 minute') "
-            )
+            time_filter = pgsql.SQL("WHERE ingested_at >= NOW() - (%s * INTERVAL '1 minute')")
             params.append(window_minutes)
-        rows = _exec_query(
-            (
-                "SELECT fault_type, COUNT(*) AS count FROM events "
-                f"{where_clause}"
-                "GROUP BY fault_type ORDER BY count DESC"
-            ),
-            tuple(params),
-            endpoint="/fault-distribution",
-        )
+        else:
+            time_filter = pgsql.SQL("")
+
+        query = pgsql.SQL(
+            "SELECT fault_type, COUNT(*) AS count FROM events {time_filter} "
+            "GROUP BY fault_type ORDER BY count DESC"
+        ).format(time_filter=time_filter)
+
+        rows = _exec_query(query, tuple(params), endpoint="/fault-distribution")
         _log_req("/fault-distribution", (time.time() - t0) * 1000, "ok", len(rows))
         return rows
     except Exception as exc:
@@ -761,22 +846,18 @@ def get_fault_distribution(window_minutes: Optional[int] = None) -> List[Dict]:
 def get_severity_distribution(window_minutes: Optional[int] = None) -> List[Dict]:
     t0 = time.time()
     try:
-        where_clause = ""
         params: List = []
         if window_minutes and window_minutes > 0:
-            where_clause = (
-                "WHERE ingested_at >= NOW() - (%s * INTERVAL '1 minute') "
-            )
+            time_filter = pgsql.SQL("WHERE ingested_at >= NOW() - (%s * INTERVAL '1 minute')")
             params.append(window_minutes)
-        rows = _exec_query(
-            (
-                "SELECT severity, COUNT(*) AS count FROM events "
-                f"{where_clause}"
-                "GROUP BY severity"
-            ),
-            tuple(params),
-            endpoint="/severity-distribution",
-        )
+        else:
+            time_filter = pgsql.SQL("")
+
+        query = pgsql.SQL(
+            "SELECT severity, COUNT(*) AS count FROM events {time_filter} GROUP BY severity"
+        ).format(time_filter=time_filter)
+
+        rows = _exec_query(query, tuple(params), endpoint="/severity-distribution")
         _log_req("/severity-distribution", (time.time() - t0) * 1000, "ok", len(rows))
         return rows
     except Exception as exc:
@@ -793,31 +874,27 @@ def get_system_failures(
     t0 = time.time()
     try:
         limit = max(1, min(limit, 25))
-        where_parts = ["e.severity IN ('CRITICAL', 'ERROR')"]
+        conditions = [pgsql.SQL("e.severity IN ('CRITICAL', 'ERROR')")]
         params: List = []
         if window_minutes and window_minutes > 0:
-            where_parts.append(
-                "e.ingested_at >= NOW() - (%s * INTERVAL '1 minute')"
-            )
+            conditions.append(pgsql.SQL("e.ingested_at >= NOW() - (%s * INTERVAL '1 minute')"))
             params.append(window_minutes)
 
         params.append(limit)
-        rows = _exec_query(
-            """
-                SELECT
-                    e.system_id,
-                    COALESCE(h.hostname, e.system_id) AS hostname,
-                    COUNT(*) AS failure_count
-                FROM events e
-                LEFT JOIN system_heartbeats h ON h.system_id = e.system_id
-                WHERE {where_clause}
-                GROUP BY e.system_id, hostname
-                ORDER BY failure_count DESC, e.system_id
-                LIMIT %s
-            """.format(where_clause=" AND ".join(where_parts)),
-            tuple(params),
-            endpoint="/system-failures",
-        )
+        query = pgsql.SQL("""
+            SELECT
+                e.system_id,
+                COALESCE(h.hostname, e.system_id) AS hostname,
+                COUNT(*) AS failure_count
+            FROM events e
+            LEFT JOIN system_heartbeats h ON h.system_id = e.system_id
+            WHERE {conditions}
+            GROUP BY e.system_id, hostname
+            ORDER BY failure_count DESC, e.system_id
+            LIMIT %s
+        """).format(conditions=pgsql.SQL(" AND ").join(conditions))
+
+        rows = _exec_query(query, tuple(params), endpoint="/system-failures")
         _log_req("/system-failures", (time.time() - t0) * 1000, "ok", len(rows))
         return rows
     except Exception as exc:
@@ -903,18 +980,25 @@ def get_pipeline_health() -> Dict:
                 lag_status = "Degraded"
 
         trend_rows = _exec_query("""
-            SELECT date_trunc('minute', ingested_at) AS bucket, COUNT(*) AS cnt
-            FROM events WHERE ingested_at > NOW() - INTERVAL '20 minutes'
+            WITH ordered AS (
+                SELECT ingested_at, date_trunc('minute', ingested_at) AS bucket,
+                       LAG(ingested_at) OVER (ORDER BY ingested_at) AS prev_at
+                FROM events WHERE ingested_at > NOW() - INTERVAL '20 minutes'
+            )
+            SELECT bucket, COUNT(*) AS cnt,
+                   ROUND(AVG(EXTRACT(EPOCH FROM (ingested_at - prev_at)) * 1000)::numeric, 0) AS bucket_lat
+            FROM ordered WHERE prev_at IS NOT NULL
             GROUP BY bucket ORDER BY bucket ASC
         """, endpoint="/pipeline-health/trend")
 
         trend_eps     = []
         trend_latency = []
         for r in trend_rows:
-            ts  = _iso(r.get("bucket"))
-            cnt = _i(r.get("cnt"))
+            ts   = _iso(r.get("bucket"))
+            cnt  = _i(r.get("cnt"))
+            blat = _i(r.get("bucket_lat"))
             trend_eps.append({"time": ts, "value": cnt})
-            trend_latency.append({"time": ts, "value": avg_latency_ms + (cnt % 10)})
+            trend_latency.append({"time": ts, "value": blat if blat > 0 else avg_latency_ms})
 
         _log_req("/pipeline-health", (time.time() - t0) * 1000, "ok")
         return {

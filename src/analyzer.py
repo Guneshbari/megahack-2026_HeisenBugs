@@ -296,16 +296,13 @@ def load_events(filename: str) -> Dict:
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: File '{filename}' not found.", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON in '{filename}': {e}", file=sys.stderr)
-        sys.exit(1)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Error: File '{filename}' not found.") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Error: Invalid JSON in '{filename}': {exc}") from exc
 
     if not isinstance(data, dict):
-        print(f"Error: Expected a JSON object in '{filename}', got {type(data).__name__}.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"Error: Expected a JSON object in '{filename}', got {type(data).__name__}.")
 
     return data
 

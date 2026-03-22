@@ -119,8 +119,11 @@ FEATURE_BUILDER_SYSTEM_BATCH_SIZE = env_int("SENTINEL_FEATURE_BUILDER_SYSTEM_BAT
 
 API_CACHE_TTL_SECONDS = env_int("SENTINEL_API_CACHE_TTL_SECONDS", 5)
 API_MAX_EVENTS_LIMIT = env_int("SENTINEL_API_MAX_EVENTS_LIMIT", 1000)
-API_CORS_ALLOWED_ORIGINS = env_csv("SENTINEL_API_CORS_ALLOWED_ORIGINS", "*")
-API_BEARER_TOKEN = os.getenv("SENTINEL_API_BEARER_TOKEN", "")
+API_CORS_ALLOWED_ORIGINS = env_csv("SENTINEL_API_CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+
+# Firebase Admin SDK auth integration
+# Set SENTINEL_FIREBASE_AUTH_ENABLED=true and SENTINEL_FIREBASE_SERVICE_ACCOUNT_PATH=/path/to/key.json
+FIREBASE_AUTH_ENABLED = env_bool("SENTINEL_FIREBASE_AUTH_ENABLED", False)
 
 # ============================================================================
 # COLLECTOR CONFIGURATION
@@ -138,7 +141,8 @@ COLLECTOR_DYNAMIC_BATCHING_ENABLED = env_bool("SENTINEL_COLLECTOR_DYNAMIC_BATCHI
 DB_CONFIG = {
     "dbname": os.getenv("SENTINEL_DB_NAME", "sentinel_logs"),
     "user": os.getenv("SENTINEL_DB_USER", "sentinel_admin"),
-    "password": os.getenv("SENTINEL_DB_PASSWORD", "changeme123"),
+    # No hardcoded default — empty string triggers startup warning and connection failure
+    "password": os.getenv("SENTINEL_DB_PASSWORD", ""),
     "host": os.getenv("SENTINEL_DB_HOST", "postgres"),
     "port": env_int("SENTINEL_DB_PORT", 5432),
     "connect_timeout": DB_QUERY_TIMEOUT_SECONDS,
