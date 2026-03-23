@@ -420,20 +420,34 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
   }, [filteredEvents]);
 
   // Filter alerts based on global state
-  const filteredAlerts = useMemo(() => alerts.filter((a) => {
-    const now = Date.now();
-    const alertTime = new Date(a.triggered_at).getTime();
-    if (alertTime < now - TIME_RANGE_MS[timeRange]) return false;
-    if (selectedSystems.length > 0 && !selectedSystems.includes(a.hostname)) return false;
-    if (selectedSeverities.length > 0 && !selectedSeverities.includes(a.severity)) return false;
-    if (searchQuery) {
-      const term = searchQuery.toLowerCase();
-      if (!a.rule.toLowerCase().includes(term) && 
-          !a.title.toLowerCase().includes(term) && 
-          !a.hostname.toLowerCase().includes(term)) return false;
-    }
-    return true;
-  }), [alerts, timeRange, selectedSystems, selectedSeverities, searchQuery]);
+  const filteredAlerts = useMemo(() => {
+    const _alerts = alerts.filter((a) => {
+      // Unacknowledged (active) alerts should NEVER be hidden by time range
+      const now = Date.now();
+      const alertTime = new Date(a.triggered_at).getTime();
+      if (a.acknowledged && alertTime < now - TIME_RANGE_MS[timeRange]) return false;
+
+      if (selectedSystems.length > 0 && !selectedSystems.includes(a.hostname)) return false;
+      if (selectedSeverities.length > 0 && !selectedSeverities.includes(a.severity)) return false;
+      if (searchQuery) {
+        const term = searchQuery.toLowerCase();
+        if (!a.rule.toLowerCase().includes(term) && 
+            !a.title.toLowerCase().includes(term) && 
+            !a.hostname.toLowerCase().includes(term)) return false;
+      }
+      return true;
+    });
+
+    // Limit unacknowledged alerts to the most recent 50 to preserve UI performance
+    let unacknowledgedCount = 0;
+    return _alerts.filter(a => {
+      if (!a.acknowledged) {
+        unacknowledgedCount++;
+        return unacknowledgedCount <= 50;
+      }
+      return true;
+    });
+  }, [alerts, timeRange, selectedSystems, selectedSeverities, searchQuery]);
 
   // Filter systems based on global state (no time filtering for status, just metadata filtering)
   const filteredSystems = useMemo(() => systems.filter((s) => {

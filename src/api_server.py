@@ -180,11 +180,17 @@ async def lifespan(app: FastAPI):
         _pool = None
 
 
+import os as _os
+_is_dev = _os.getenv("SENTINEL_ENV", "production").lower() == "development"
+
 app = FastAPI(
     title="SentinelCore API",
     description="Live telemetry data API for the SentinelCore dashboard",
     version="2.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if _is_dev else None,
+    redoc_url="/redoc" if _is_dev else None,
+    openapi_url="/openapi.json" if _is_dev else None,
 )
 
 app.add_middleware(
@@ -570,15 +576,14 @@ def get_systems() -> List[Dict]:
         def load_systems() -> List[Dict]:
             rows = _exec_query("""
                 WITH counts AS (
-                    SELECT system_id, COUNT(*) AS total_events
-                    FROM events
+                    SELECT system_id, SUM(total_events) AS total_events
+                    FROM feature_snapshots
                     GROUP BY system_id
                 ),
                 critical_counts AS (
-                    SELECT system_id, COUNT(*) AS critical_count
-                    FROM events
-                    WHERE severity = 'CRITICAL'
-                      AND ingested_at > NOW() - INTERVAL '1 hour'
+                    SELECT system_id, SUM(critical_count) AS critical_count
+                    FROM feature_snapshots
+                    WHERE snapshot_time > NOW() - INTERVAL '1 hour'
                     GROUP BY system_id
                 )
                 SELECT
@@ -591,7 +596,37 @@ def get_systems() -> List[Dict]:
                 LEFT JOIN counts          c  ON c.system_id  = h.system_id
                 LEFT JOIN critical_counts cc ON cc.system_id = h.system_id
                 ORDER BY h.system_id
+                LIMIT 1000
             """, endpoint="/systems")
+
+            # Fallback to bounded events table (last 24 hours) if snapshots are completely empty/unavailable
+            if not any(r.get("total_events", 0) > 0 for r in rows):
+                rows = _exec_query("""
+                    WITH counts AS (
+                        SELECT system_id, COUNT(*) AS total_events
+                        FROM events
+                        WHERE ingested_at > NOW() - INTERVAL '24 hours'
+                        GROUP BY system_id
+                    ),
+                    critical_counts AS (
+                        SELECT system_id, COUNT(*) AS critical_count
+                        FROM events
+                        WHERE severity = 'CRITICAL'
+                          AND ingested_at > NOW() - INTERVAL '1 hour'
+                        GROUP BY system_id
+                    )
+                    SELECT
+                        h.system_id, h.hostname,
+                        h.cpu_usage_percent, h.memory_usage_percent, h.disk_free_percent,
+                        h.os_version, h.last_seen,
+                        COALESCE(c.total_events, 0)    AS total_events,
+                        COALESCE(cc.critical_count, 0) AS critical_count
+                    FROM system_heartbeats h
+                    LEFT JOIN counts          c  ON c.system_id  = h.system_id
+                    LEFT JOIN critical_counts cc ON cc.system_id = h.system_id
+                    ORDER BY h.system_id
+                    LIMIT 1000
+                """, endpoint="/systems(fallback)")
 
             systems: List[Dict] = []
             for row in rows:
@@ -1347,17 +1382,34 @@ def prometheus_metrics() -> PlainTextResponse:
     try:
         row = _exec_one("""
             SELECT
-                COUNT(*)                                             AS total_events,
-                COUNT(*) FILTER (WHERE severity = 'CRITICAL')       AS critical_events,
-                COUNT(*) FILTER (WHERE severity = 'ERROR')          AS error_events,
-                COUNT(*) FILTER (WHERE severity = 'WARNING')        AS warning_events,
-                COUNT(*) FILTER (WHERE severity = 'INFO')           AS info_events,
-                ROUND(AVG(cpu_usage_percent)::numeric, 2)           AS avg_cpu,
-                ROUND(AVG(memory_usage_percent)::numeric, 2)        AS avg_memory,
-                ROUND(AVG(disk_free_percent)::numeric, 2)           AS avg_disk_free,
-                COUNT(DISTINCT system_id)                           AS total_systems
-            FROM events
+                SUM(total_events)                                    AS total_events,
+                SUM(critical_count)                                  AS critical_events,
+                SUM(error_count)                                     AS error_events,
+                SUM(warning_count)                                   AS warning_events,
+                SUM(info_count)                                      AS info_events,
+                ROUND(AVG(cpu_usage_percent)::numeric, 2)            AS avg_cpu,
+                ROUND(AVG(memory_usage_percent)::numeric, 2)         AS avg_memory,
+                ROUND(AVG(disk_free_percent)::numeric, 2)            AS avg_disk_free,
+                COUNT(DISTINCT system_id)                            AS total_systems
+            FROM feature_snapshots
         """, endpoint="/metrics-export")
+
+        # Fallback to heavily bounded query if snapshots are empty/broken
+        if not row or row.get('total_events') is None:
+            row = _exec_one("""
+                SELECT
+                    COUNT(*)                                             AS total_events,
+                    COUNT(*) FILTER (WHERE severity = 'CRITICAL')        AS critical_events,
+                    COUNT(*) FILTER (WHERE severity = 'ERROR')           AS error_events,
+                    COUNT(*) FILTER (WHERE severity = 'WARNING')         AS warning_events,
+                    COUNT(*) FILTER (WHERE severity = 'INFO')            AS info_events,
+                    ROUND(AVG(cpu_usage_percent)::numeric, 2)            AS avg_cpu,
+                    ROUND(AVG(memory_usage_percent)::numeric, 2)         AS avg_memory,
+                    ROUND(AVG(disk_free_percent)::numeric, 2)            AS avg_disk_free,
+                    COUNT(DISTINCT system_id)                            AS total_systems
+                FROM events
+                WHERE ingested_at > NOW() - INTERVAL '24 hours'
+            """, endpoint="/metrics-export(fallback)")
 
         online_row = _exec_one("""
             SELECT COUNT(DISTINCT system_id) AS online_systems
@@ -1424,7 +1476,7 @@ def health_check() -> Dict:
     except Exception as exc:
         _log_failure("/health", "endpoint", exc)
         _log_req("/health", (time.time() - t0) * 1000, "error")
-        return {"status": "degraded", "database": str(exc)}
+        return {"status": "degraded"}
 
 @app.get("/report/generate")
 def generate_report() -> JSONResponse:

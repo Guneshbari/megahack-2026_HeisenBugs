@@ -32,19 +32,20 @@ export function syncApiSessionAuth(isAuthenticated: boolean): void {
   apiSessionAuthenticated = isAuthenticated;
 }
 
-async function buildHeaders(): Promise<HeadersInit | undefined> {
+async function buildHeaders(): Promise<HeadersInit> {
   if (!apiSessionAuthenticated || !auth.currentUser) {
-    return undefined;
+    throw new Error('Not authenticated. Please log in to access this resource.');
   }
 
   try {
-    const token = await auth.currentUser.getIdToken();
+    // force=true refreshes the token if it is close to expiry (< 5 min)
+    const token = await auth.currentUser.getIdToken(true);
     return {
       Authorization: `Bearer ${token}`,
     };
   } catch (error) {
     console.error('Failed to get Firebase token for API request:', error);
-    return undefined;
+    throw new Error('Authentication token unavailable. Please refresh your session.');
   }
 }
 
@@ -248,6 +249,20 @@ export async function createAlertRule(ruleName: string, condition: string, sever
   return res.json();
 }
 
-export function getReportDownloadUrl(): string {
-  return buildEndpoint('/report/generate');
+/**
+ * Download a JSON report via authenticated fetch (avoids exposing the URL without a token).
+ */
+export async function downloadReport(): Promise<void> {
+  const headers = await buildHeaders();
+  const res = await fetch(buildEndpoint('/report/generate'), { headers });
+  if (!res.ok) throw new Error(`Report generation failed: ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sentinelcore_report.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

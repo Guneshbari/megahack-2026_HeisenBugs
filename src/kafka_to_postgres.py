@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -956,7 +957,37 @@ def run_consumer() -> None:
                     else:
                         failed_messages += 1
                         batch_failures += 1
-                        partition_had_failure = True
+                        
+                        # Fix: Drop-and-Proceed Dead Letter Queue (DLQ) Strategy
+                        # If a message fails all retries, do NOT break the partition.
+                        # Advance the offset anyway and log heavily so the ingestion pipeline isn't permanently stalled.
+                        logger.error(f"[DLQ] Poison pill message dropped after retries exhausted from {system_id} at offset {message.offset}")
+                        
+                        dlq_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlq")
+                        os.makedirs(dlq_dir, exist_ok=True)
+                        dlq_path = os.path.join(dlq_dir, f"dlq_{system_id}_{message.offset}.json")
+                        try:
+                            with open(dlq_path, "w", encoding="utf-8") as f:
+                                json.dump(payload, f, ensure_ascii=False, indent=2)
+                        except Exception as dlq_exc:
+                            logger.error(f"[DLQ] Failed to write DLQ file {dlq_path}: {dlq_exc}")
+
+                        structured_log(
+                            "kafka_to_postgres",
+                            {
+                                "operation": "dlq_message_dropped",
+                                "status": "critical_failure",
+                                "system_id": system_id,
+                                "topic": getattr(topic_partition, "topic", KAFKA_TOPIC),
+                                "partition": getattr(topic_partition, "partition", "unknown"),
+                                "offset": message.offset,
+                                "event_count": event_count,
+                                "dlq_file": dlq_path,
+                            },
+                            log=logger,
+                        )
+                        # Advance past the bad message to unblock the partition stream
+                        last_committable_offset = message.offset + 1
 
                     if latency_ms >= CONSUMER_DB_SLOW_MS:
                         logger.warning(
