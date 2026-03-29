@@ -770,11 +770,25 @@ def get_recent_alerts() -> List[Dict]:
 class AlertActionRequest(BaseModel):
     alert_id: str
 
+    @property
+    def record_id(self) -> Optional[int]:
+        """Parse the numeric record ID from 'ALERT-<int>'. Returns None on malformed input."""
+        try:
+            raw = self.alert_id.replace("ALERT-", "", 1)
+            if not raw.isdigit():
+                return None
+            return int(raw)
+        except Exception:
+            return None
+
 @app.post("/alerts/acknowledge")
 def acknowledge_alert(req: AlertActionRequest, request: Request) -> Dict:
     t0 = time.time()
     try:
-        record_id = int(req.alert_id.replace("ALERT-", ""))
+        record_id = req.record_id
+        if record_id is None:
+            _log_failure("/alerts/acknowledge", "validation", f"malformed alert_id: {req.alert_id!r}")
+            return {"success": False, "error": "Invalid alert_id format"}
         def _run_ack() -> bool:
             with _get_db() as conn:
                 with conn.cursor() as cur:
@@ -801,7 +815,10 @@ def acknowledge_alert(req: AlertActionRequest, request: Request) -> Dict:
 def escalate_alert(req: AlertActionRequest, request: Request) -> Dict:
     t0 = time.time()
     try:
-        record_id = int(req.alert_id.replace("ALERT-", ""))
+        record_id = req.record_id
+        if record_id is None:
+            _log_failure("/alerts/escalate", "validation", f"malformed alert_id: {req.alert_id!r}")
+            return {"success": False, "error": "Invalid alert_id format"}
         def _run_esc() -> bool:
             with _get_db() as conn:
                 with conn.cursor() as cur:
@@ -899,27 +916,33 @@ class SystemCommandRequest(BaseModel):
 def system_command(req: SystemCommandRequest, request: Request) -> Dict:
     t0 = time.time()
     try:
+        # Validate command length to prevent excessive audit log entries
+        if not req.command or len(req.command) > 500:
+            return {"success": False, "output": "Invalid command: must be 1-500 characters"}
         def _run_audit() -> bool:
             with _get_db() as conn:
                 with conn.cursor() as cur:
                     user_id = getattr(request.state, "uid", "anonymous")
+                    # Truncate command in audit log to prevent log injection
+                    safe_cmd = req.command[:200] if req.command else ""
                     cur.execute(
                         "INSERT INTO audit_logs (user_id, action, resource_id) VALUES (%s, %s, %s)",
-                        (user_id, f"system_cmd: {req.command}", req.system_id)
+                        (user_id, f"system_cmd: {safe_cmd}", req.system_id[:100])
                     )
                 conn.commit()
             return True
         retry_with_backoff(_run_audit, label="/systems/command")
-        
-        # Mock execution response
-        output = f"[SENTINEL-CMD] Executing `{req.command}` on node {req.system_id}...\n"
-        output += f"[SENTINEL-CMD] Operation completed successfully at {datetime.now(timezone.utc).isoformat()}."
-        
+
+        # Mock execution response (no real shell execution)
+        output = f"[SENTINEL-CMD] Command queued for node {req.system_id}.\n"
+        output += f"[SENTINEL-CMD] Dispatched at {datetime.now(timezone.utc).isoformat()}."
+
         _log_req("/systems/command", (time.time() - t0) * 1000, "ok")
         return {"success": True, "output": output}
     except Exception as exc:
         _log_failure("/systems/command", "endpoint", exc)
-        return {"success": False, "output": str(exc)}
+        # Do not leak internal exception text to the client
+        return {"success": False, "output": "Command dispatch failed. Check server logs."}
 
 @app.get("/pipeline-health/status")
 def get_pipeline_health_status() -> Dict:
@@ -1493,7 +1516,8 @@ def generate_report() -> JSONResponse:
         return JSONResponse(content=report_data)
     except Exception as exc:
         _log_failure("/report/generate", "endpoint", exc)
-        return JSONResponse(content={"error": str(exc)}, status_code=500)
+        # Do not leak internal exception details to clients
+        return JSONResponse(content={"error": "Report generation failed. Check server logs."}, status_code=500)
 
 @app.get("/ml/predictions")
 def get_ml_predictions(limit: int = 100) -> JSONResponse:

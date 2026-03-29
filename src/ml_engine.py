@@ -8,6 +8,7 @@ import psycopg2.extras
 
 MODEL_VERSION = 'v1'
 CYCLE_INTERVAL = 30
+_MAX_RECONNECT_SLEEP = 60  # seconds — caps exponential backoff
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('ml_engine')
@@ -45,61 +46,83 @@ def predict_fault(snapshot: Dict[str, Any]) -> str:
         return 'SERVICE_DEGRADATION'
     return 'NONE'
 
-def write_prediction(conn: Any, system_id: str, anomaly: float, failure: float, fault: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO ml_predictions (
-                system_id, prediction_time,
-                anomaly_score, failure_probability,
-                predicted_fault, model_version
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            system_id,
-            datetime.now(timezone.utc),
-            anomaly,
-            failure,
-            fault,
-            MODEL_VERSION
-        ))
-    conn.commit()
+def write_prediction(conn: Any, system_id: str, anomaly: float, failure: float, fault: str) -> bool:
+    """Insert one ML prediction row. Returns True on success, False on failure."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO ml_predictions (
+                    system_id, prediction_time,
+                    anomaly_score, failure_probability,
+                    predicted_fault, model_version
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                system_id,
+                datetime.now(timezone.utc),
+                # Clamp scores to [0.0, 1.0] — guard against NaN/Inf from future models
+                max(0.0, min(1.0, float(anomaly))),
+                max(0.0, min(1.0, float(failure))),
+                fault or 'NONE',
+                MODEL_VERSION
+            ))
+        conn.commit()
+        return True
+    except Exception as exc:
+        logger.error('[write_prediction] %s: %s', system_id, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
 
 def run_cycle(conn: Any) -> None:
-    # Future placeholder:
-    # model = joblib.load('model.pkl')
-    # prediction = model.predict(features)
-    
+    """Run one ML prediction cycle over the latest feature snapshots."""
     snapshots = fetch_latest_snapshots(conn)
     if not snapshots:
         return
-        
+
+    written = 0
     for snap in snapshots:
-        system_id = snap['system_id']
+        system_id = snap.get('system_id') or 'unknown'
         anomaly = simple_anomaly_score(snap)
         failure = simple_failure_probability(snap)
         fault   = predict_fault(snap)
-        write_prediction(conn, system_id, anomaly, failure, fault)
-    
-    logger.info(f"Generated ML predictions for {len(snapshots)} systems.")
+        if write_prediction(conn, system_id, anomaly, failure, fault):
+            written += 1
+
+    logger.info('Generated ML predictions for %d/%d systems.', written, len(snapshots))
 
 def run_ml_engine() -> None:
-    logger.info("Starting ML Engine worker...")
+    """Run the ML engine in an infinite loop with reconnect on DB failure."""
+    logger.info('Starting ML Engine worker...')
     conn, ok = retry_with_backoff(make_db_connection, label='ml_engine_connect')
     if not ok or not conn:
-        logger.error('DB connection failed')
+        logger.error('DB connection failed on startup — aborting ML engine')
         return
+
+    reconnect_delay = 5.0  # seconds, doubles on each failure, capped at _MAX_RECONNECT_SLEEP
 
     while True:
         try:
+            if conn is None:
+                raise RuntimeError('No active DB connection')
             run_cycle(conn)
-        except Exception as e:
-            logger.error(f'Cycle error: {e}')
-            # attempt quick reconnect
+            reconnect_delay = 5.0  # reset on success
+        except Exception as exc:
+            logger.error('ML engine cycle error: %s', exc)
             try:
                 conn.close()
             except Exception:
                 pass
-            conn, _ = retry_with_backoff(make_db_connection, label='ml_engine_reconnect')
-        
+            conn = None
+            logger.info('ML engine reconnecting in %.0fs...', reconnect_delay)
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_SLEEP)
+            conn, ok = retry_with_backoff(make_db_connection, label='ml_engine_reconnect')
+            if not ok or not conn:
+                logger.error('ML engine DB reconnect failed — will retry on next cycle')
+                conn = None
+
         time.sleep(CYCLE_INTERVAL)
 
 if __name__ == '__main__':

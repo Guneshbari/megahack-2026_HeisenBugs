@@ -15,7 +15,7 @@ import {
   formatTimestamp,
 } from '../data/mockData';
 import { useDashboard } from '../context/DashboardContext';
-import { getReportDownloadUrl } from '../lib/api';
+import { downloadReport } from '../lib/api';
 
 export default function OverviewPage() {
   const navigate = useNavigate();
@@ -46,7 +46,7 @@ export default function OverviewPage() {
           <h2 className="text-lg font-bold text-text-primary tracking-tight">Mission Control</h2>
           <p className="text-[11px] text-text-muted mt-0.5">System telemetry & alert activity overview</p>
         </div>
-        <button onClick={() => window.open(getReportDownloadUrl(), '_blank')} className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-border bg-bg-surface text-xs font-semibold text-text-primary hover:bg-bg-hover hover:-translate-y-0.5 transition-all">
+        <button onClick={() => downloadReport().catch(console.error)} className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-border bg-bg-surface text-xs font-semibold text-text-primary hover:bg-bg-hover hover:-translate-y-0.5 transition-all">
           <Download className="w-4 h-4 text-signal-primary" />
           <span>Generate Report</span>
         </button>

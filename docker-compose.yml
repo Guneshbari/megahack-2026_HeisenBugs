@@ -13,6 +13,12 @@ x-backend-base: &backend-base
     - SENTINEL_DB_NAME=sentinel_db
     - SENTINEL_DB_POOL_MAX=20
     - SENTINEL_INSERT_BATCH_SIZE=1000
+    # REQUIRED: Generate with: openssl rand -hex 32
+    # Shared secret between collector agents and the Kafka consumer.
+    # Without this, all Python services will crash on startup.
+    - SENTINEL_COLLECTOR_SECRET=CHANGE_ME_GENERATE_WITH_openssl_rand_hex_32
+    # Set to 'development' to enable /docs, /redoc, /openapi.json on the API server
+    - SENTINEL_ENV=production
     # Firebase auth — override with real values in production
     - SENTINEL_FIREBASE_AUTH_ENABLED=false
     - SENTINEL_FIREBASE_SERVICE_ACCOUNT_PATH=

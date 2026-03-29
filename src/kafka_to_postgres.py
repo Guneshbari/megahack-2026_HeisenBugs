@@ -12,6 +12,8 @@ This consumer preserves the existing pipeline contract while adding:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -907,10 +909,22 @@ def run_consumer() -> None:
                         break
 
                     payload = message.value
-                    if payload.get("agent_key") != COLLECTOR_SECRET:
-                        logger.warning("Rejected message: Invalid or missing agent_key from %s", payload.get("system_info", {}).get("system_id", "unknown"))
+                    # Timing-safe comparison — prevents secret extraction via timing side-channels
+                    submitted_key = payload.get("agent_key") or ""
+                    if not isinstance(submitted_key, str):
+                        submitted_key = ""
+                    key_valid = hmac.compare_digest(
+                        submitted_key.encode("utf-8"),
+                        COLLECTOR_SECRET.encode("utf-8"),
+                    )
+                    if not key_valid:
+                        logger.warning(
+                            "Rejected message: Invalid or missing agent_key from %s",
+                            (payload.get("system_info") or {}).get("system_id", "unknown"),
+                        )
                         failed_messages += 1
                         batch_failures += 1
+                        last_committable_offset = message.offset + 1
                         continue
 
                     system_id = payload.get("system_id") or (payload.get("system_info") or {}).get("system_id") or "unknown"
