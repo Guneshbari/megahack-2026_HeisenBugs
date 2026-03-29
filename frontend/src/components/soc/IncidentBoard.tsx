@@ -106,10 +106,10 @@ function ImpactRow({ incident }: { incident: Incident }) {
       <span style={{ fontSize: 9, color: '#334155', textTransform: 'uppercase', alignSelf: 'center' }}>IMPACT</span>
       <ImpactKpi label="SYSTEMS" value={String(incident.impact.systems_affected)}
         color={incident.impact.systems_affected > 2 ? '#F97316' : '#94A3B8'} />
-      <ImpactKpi label="EST LATENCY" value={incident.impact.est_latency_delta}
-        color={parseInt(incident.impact.est_latency_delta) > 200 ? '#DC2626' : '#F97316'} />
-      <ImpactKpi label="ERR RATE" value={`${incident.impact.est_error_rate_pct}%`}
-        color={incident.impact.est_error_rate_pct > 20 ? '#DC2626' : '#FACC15'} />
+      <ImpactKpi label="AVG CPU" value={incident.impact.avg_cpu}
+        color={parseInt(incident.impact.avg_cpu) > 80 ? '#DC2626' : '#F97316'} />
+      <ImpactKpi label="ERR DELTA" value={incident.impact.error_rate_delta}
+        color={parseInt(incident.impact.error_rate_delta) > 20 ? '#DC2626' : '#FACC15'} />
       <ImpactKpi label="FAULT" value={incident.impact.dominant_fault} color="#6B7C93" />
     </div>
   );

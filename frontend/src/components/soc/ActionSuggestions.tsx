@@ -7,53 +7,7 @@
  */
 import type { Incident } from '../../store/incidentStore';
 
-interface Action {
-  step:        string;
-  command?:    string;  // example CLI/query to run
-  priority:    'immediate' | 'investigate' | 'monitor';
-}
-
-const PLAYBOOK: Record<string, Action[]> = {
-  'Auth Failure': [
-    { step: 'Lock affected accounts temporarily',          priority: 'immediate' },
-    { step: 'Check IP blocklist for 192.168.0.0/24',      command: 'netstat -an | grep :443', priority: 'immediate' },
-    { step: 'Review auth service logs for brute-force patterns', priority: 'investigate' },
-    { step: 'Enable rate-limiting on auth endpoint',      priority: 'investigate' },
-    { step: 'Monitor login success rate over next 15m',   priority: 'monitor' },
-  ],
-  'High CPU': [
-    { step: 'Identify top CPU-consuming processes',  command: 'tasklist /FI "CPU gt 30"', priority: 'immediate' },
-    { step: 'Check for runaway services — consider restart', priority: 'immediate' },
-    { step: 'Scale out to additional app nodes',     priority: 'investigate' },
-    { step: 'Review recent deployments for CPU regression', priority: 'investigate' },
-  ],
-  'Disk Space': [
-    { step: 'Identify largest directories',  command: 'du -sh /* | sort -rh | head -20', priority: 'immediate' },
-    { step: 'Rotate/compress old log files', command: 'find /var/log -name "*.log" -mtime +7 | xargs gzip', priority: 'immediate' },
-    { step: 'Check DB data volume growth rate',       priority: 'investigate' },
-    { step: 'Alert on disk > 90% via pipeline rule',  priority: 'monitor' },
-  ],
-  'Service Crash': [
-    { step: 'Check OOM killer logs',         command: 'dmesg | grep -i "oom\\|killed"', priority: 'immediate' },
-    { step: 'Restart affected service',      command: 'systemctl restart <service>', priority: 'immediate' },
-    { step: 'Review crash dump / core files',         priority: 'investigate' },
-    { step: 'Check memory limits in service config',  priority: 'investigate' },
-    { step: 'Monitor restart loop (> 3 restarts/h)',  priority: 'monitor' },
-  ],
-  'Network Drop': [
-    { step: 'Verify physical/virtual NIC link state', command: 'ip link show', priority: 'immediate' },
-    { step: 'Check BGP peer reachability',   command: 'ping -c 5 203.0.113.1', priority: 'immediate' },
-    { step: 'Validate MTU settings (expect 1500)',    priority: 'investigate' },
-    { step: 'Check for upstream ISP/DC status page',  priority: 'investigate' },
-    { step: 'Monitor packet loss rate for 10m',       priority: 'monitor' },
-  ],
-};
-
-const FALLBACK_ACTIONS: Action[] = [
-  { step: 'Capture current system state snapshot',    priority: 'immediate' },
-  { step: 'Review recent changes in change log',      priority: 'investigate' },
-  { step: 'Escalate if not resolved within 15 min',   priority: 'monitor' },
-];
+import { getSuggestedActions } from '../../lib/actionEngine';
 
 const PRIORITY_COLOR = {
   immediate:   '#DC2626',
@@ -68,12 +22,7 @@ const PRIORITY_DOT_LABEL = {
 };
 
 export default function ActionSuggestions({ incident }: { incident: Incident }) {
-  // Match fault type — try exact first, then partial
-  const actions = PLAYBOOK[incident.fault_type]
-    ?? Object.entries(PLAYBOOK).find(([key]) =>
-        incident.fault_type.toLowerCase().includes(key.toLowerCase())
-      )?.[1]
-    ?? FALLBACK_ACTIONS;
+  const actions = getSuggestedActions(incident.fault_type, incident.trigger !== 'signal');
 
   // Filter: for LOW priority show only monitor; for HIGH show all; for MEDIUM skip monitor
   const filtered = actions.filter((a) => {

@@ -25,8 +25,8 @@ export type TrendDirection    = 'rising' | 'stable' | 'falling';
 
 export interface IncidentImpact {
   systems_affected:    number;
-  est_latency_delta:   string;   // e.g. "+180ms"
-  est_error_rate_pct:  number;   // e.g. 34  → "34%"
+  avg_cpu:             string;   // e.g. "45%"
+  error_rate_delta:    string;   // e.g. "+12%"
   dominant_fault:      string;
 }
 
@@ -108,14 +108,10 @@ function computeImpact(
 ): IncidentImpact {
   const relevantSnaps = snapshots.filter((s) => systems.includes(s.system_id));
 
-  // Latency estimation: DB/Disk faults → higher latency delta
-  const isDbFault      = /db|disk|storage/i.test(faultType);
-  const isNetworkFault = /network|drop|nic/i.test(faultType);
-  const isCpuFault     = /cpu|process|memory/i.test(faultType);
-
-  const baseLatency = isDbFault ? 180 : isNetworkFault ? 400 : isCpuFault ? 60 : 30;
-  const criticalMul = relevantSnaps.reduce((max, s) => Math.max(max, s.critical_count / (s.total_events || 1)), 0);
-  const estLatency  = Math.round(baseLatency * (1 + criticalMul * 5));
+  // avg CPU from feature snapshots
+  const avgCpu = relevantSnaps.length > 0
+    ? relevantSnaps.reduce((sum, s) => sum + s.cpu_usage_percent, 0) / relevantSnaps.length
+    : 0;
 
   // Error rate: from snapshot critical+error ratios
   const avgErrRate = relevantSnaps.length > 0
@@ -128,8 +124,8 @@ function computeImpact(
 
   return {
     systems_affected:   systems.length,
-    est_latency_delta:  `+${estLatency}ms`,
-    est_error_rate_pct: Math.round(avgErrRate * 100),
+    avg_cpu:            `${Math.round(avgCpu)}%`,
+    error_rate_delta:   `+${Math.round(avgErrRate * 100)}%`,
     dominant_fault:     dominantFault,
   };
 }
@@ -163,19 +159,14 @@ export function computeSystemHealthIndex(
   signals:     GroupedSignal[],
   mlPredictions: MLPrediction[],
 ): number {
-  const critInc   = incidents.filter((i) => i.severity === 'CRITICAL').length;
-  const errInc    = incidents.filter((i) => i.severity === 'ERROR').length;
+  const totalIncidents = incidents.length;
   const spikes    = signals.filter((s) => s.isSpike).length;
   const highML    = mlPredictions.filter((p) => p.anomaly_score > 0.7 || p.failure_probability > 0.6).length;
 
-  // Weighted deductions
-  const penalty =
-    critInc  * 18 +   // critical incidents: heavy
-    errInc   * 8  +   // error incidents: moderate
-    spikes   * 2  +   // signal spikes: mild
-    highML   * 5;     // high ML risk: significant
+  // Formula: 100 - (incidents*10 + signals*0.5 + ml_risk*30)
+  const penalty = (totalIncidents * 10) + (spikes * 0.5) + (highML * 30);
 
-  return Math.max(0, Math.min(100, 100 - penalty));
+  return Math.max(0, Math.min(100, Math.round(100 - penalty)));
 }
 
 // ── Main derivation ──────────────────────────────────────────────────
