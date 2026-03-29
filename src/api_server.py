@@ -525,7 +525,9 @@ def get_events(
             where_clause = pgsql.SQL("WHERE ") + pgsql.SQL(" AND ").join(conditions)
 
         query = pgsql.SQL("""
-            SELECT id, system_id, fault_type, severity, provider_name, event_id,
+            SELECT id, system_id,
+                   COALESCE(NULLIF(hostname, ''), system_id) AS hostname,
+                   fault_type, severity, provider_name, event_id,
                    cpu_usage_percent, memory_usage_percent, disk_free_percent,
                    event_hash, diagnostic_context, raw_xml, ingested_at,
                    event_message, parsed_message, normalized_message,
@@ -589,7 +591,7 @@ def get_systems() -> List[Dict]:
                 SELECT
                     h.system_id, h.hostname,
                     h.cpu_usage_percent, h.memory_usage_percent, h.disk_free_percent,
-                    h.os_version, h.last_seen,
+                    h.os_version, h.ip_address, h.last_seen,
                     COALESCE(c.total_events, 0)    AS total_events,
                     COALESCE(cc.critical_count, 0) AS critical_count
                 FROM system_heartbeats h
@@ -618,7 +620,7 @@ def get_systems() -> List[Dict]:
                     SELECT
                         h.system_id, h.hostname,
                         h.cpu_usage_percent, h.memory_usage_percent, h.disk_free_percent,
-                        h.os_version, h.last_seen,
+                        h.os_version, h.ip_address, h.last_seen,
                         COALESCE(c.total_events, 0)    AS total_events,
                         COALESCE(cc.critical_count, 0) AS critical_count
                     FROM system_heartbeats h
@@ -655,8 +657,11 @@ def get_systems() -> List[Dict]:
                     "disk_free_percent":    disk,
                     "os_version":           row.get("os_version", "Windows"),
                     "last_seen":            last_seen,
-                    "ip_address":           "",
+                    # Include ip_address from heartbeat row (was hardcoded empty string)
+                    "ip_address":           row.get("ip_address") or "",
                     "total_events":         _i(row.get("total_events")),
+                    # Expose data freshness: clients can show a staleness warning
+                    "last_updated_at":      last_seen,
                 })
             return systems
 
@@ -677,20 +682,23 @@ def get_systems() -> List[Dict]:
 
 
 @app.get("/alerts")
-def get_alerts() -> List[Dict]:
+def get_alerts(limit: int = 200) -> List[Dict]:
     t0 = time.time()
     try:
-        rows = _exec_query("""
+        limit = _bounded_limit(limit)
+        rows = _exec_query(pgsql.SQL("""
             SELECT
-                system_id, system_id AS hostname, severity, fault_type,
+                system_id,
+                COALESCE(NULLIF(hostname, ''), system_id) AS hostname,
+                severity, fault_type,
                 provider_name, diagnostic_context,
                 ingested_at AS event_time, id AS event_record_id,
                 acknowledged, escalated
             FROM events
             WHERE severity IN ('CRITICAL', 'ERROR', 'WARNING')
             ORDER BY ingested_at DESC
-            LIMIT 50
-        """, endpoint="/alerts")
+            LIMIT %s
+        """), (limit,), endpoint="/alerts")
 
         alerts: List[Dict] = []
         for i, row in enumerate(rows):
@@ -970,35 +978,115 @@ def get_pipeline_health_status() -> Dict:
         return {"status": "DOWN", "delay_seconds": 999}
 
 
+@app.get("/system-metrics")
+def get_system_metrics() -> Dict:
+    """
+    Fleet-wide average resource metrics from the most recent heartbeat per system.
+
+    Uses system_heartbeats (live data) rather than the events table (historical
+    snapshots at event-fire time) so the numbers match what the OS actually reports.
+    Falls back to the events table if no heartbeats exist yet.
+    """
+    t0 = time.time()
+    try:
+        def load_system_metrics() -> Dict:
+            # Primary: latest heartbeat values per system (most accurate, reflects current state)
+            row = _exec_one("""
+                SELECT
+                    ROUND(AVG(cpu_usage_percent)::numeric, 1)    AS avg_cpu,
+                    ROUND(AVG(memory_usage_percent)::numeric, 1) AS avg_memory,
+                    ROUND(AVG(disk_free_percent)::numeric, 1)    AS avg_disk
+                FROM system_heartbeats
+                WHERE last_seen > NOW() - INTERVAL '5 minutes'
+            """, endpoint="/system-metrics")
+
+            avg_cpu  = _f(row.get("avg_cpu"))
+            avg_mem  = _f(row.get("avg_memory"))
+            avg_disk = _f(row.get("avg_disk"))
+
+            # Fallback: use last 1 hour of event readings if no fresh heartbeats
+            if avg_cpu == 0.0 and avg_mem == 0.0:
+                fallback = _exec_one("""
+                    SELECT
+                        ROUND(AVG(cpu_usage_percent)::numeric, 1)    AS avg_cpu,
+                        ROUND(AVG(memory_usage_percent)::numeric, 1) AS avg_memory,
+                        ROUND(AVG(disk_free_percent)::numeric, 1)    AS avg_disk
+                    FROM events
+                    WHERE ingested_at > NOW() - INTERVAL '1 hour'
+                """, endpoint="/system-metrics_fallback")
+                avg_cpu  = _f(fallback.get("avg_cpu"))
+                avg_mem  = _f(fallback.get("avg_memory"))
+                avg_disk = _f(fallback.get("avg_disk"))
+
+            return {"avg_cpu": avg_cpu, "avg_memory": avg_mem, "avg_disk": avg_disk}
+
+        result = _response_cache.get_or_set(
+            _cache_key("/system-metrics"),
+            API_CACHE_TTL_SECONDS,
+            load_system_metrics,
+        )
+        _log_req("/system-metrics", (time.time() - t0) * 1000, "ok")
+        return result
+
+    except Exception as exc:
+        _log_failure("/system-metrics", "endpoint", exc)
+        return {"avg_cpu": 0.0, "avg_memory": 0.0, "avg_disk": 0.0}
+
+
 @app.get("/metrics")
-def get_metrics(start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[Dict]:
-    """Time-bucketed metric points. Falls back to feature_snapshots if no recent events."""
+def get_metrics(
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    window_minutes: Optional[int] = None,
+) -> List[Dict]:
+    """Time-bucketed metric points. Falls back to feature_snapshots if no recent events.
+
+    Adaptive bucket granularity:
+      - ≤ 60 min window  → 5-minute buckets  (max 12 points)
+      - ≤ 360 min window → 15-minute buckets (max 24 points)
+      - > 360 min window → 1-hour buckets    (max 24 points for 24h)
+    """
     t0 = time.time()
     try:
         def load_metrics() -> List[Dict]:
-            params = []
+            params: List[Any] = []
+            # Resolve bucket size based on window
+            wm = window_minutes or 1440  # default 24h
+            if wm <= 60:
+                bucket_trunc = "5 minutes"
+            elif wm <= 360:
+                bucket_trunc = "15 minutes"
+            else:
+                bucket_trunc = "1 hour"
+
             if start_time and end_time:
                 time_filter = pgsql.SQL("WHERE ingested_at >= %s AND ingested_at <= %s")
                 params.extend([start_time, end_time])
+            elif window_minutes and window_minutes > 0:
+                time_filter = pgsql.SQL("WHERE ingested_at > NOW() - (%s * INTERVAL '1 minute')")
+                params.append(window_minutes)
             else:
                 time_filter = pgsql.SQL("WHERE ingested_at > NOW() - INTERVAL '24 hours'")
-            
+
             query = pgsql.SQL("""
                 SELECT
-                    date_trunc('hour', ingested_at)                             AS bucket,
-                    COUNT(*)                                                     AS event_count,
-                    COUNT(*) FILTER (WHERE severity = 'CRITICAL')               AS critical_count,
-                    COUNT(*) FILTER (WHERE severity = 'ERROR')                  AS error_count,
-                    COUNT(*) FILTER (WHERE severity = 'WARNING')                AS warning_count,
-                    COUNT(*) FILTER (WHERE severity = 'INFO')                   AS info_count,
-                    ROUND(AVG(cpu_usage_percent)::numeric, 1)                   AS avg_cpu,
-                    ROUND(AVG(memory_usage_percent)::numeric, 1)                AS avg_memory,
-                    ROUND(AVG(disk_free_percent)::numeric, 1)                   AS avg_disk_free
+                    date_trunc({bucket}, ingested_at)                       AS bucket,
+                    COUNT(*)                                                 AS event_count,
+                    COUNT(*) FILTER (WHERE severity = 'CRITICAL')           AS critical_count,
+                    COUNT(*) FILTER (WHERE severity = 'ERROR')              AS error_count,
+                    COUNT(*) FILTER (WHERE severity = 'WARNING')            AS warning_count,
+                    COUNT(*) FILTER (WHERE severity = 'INFO')               AS info_count,
+                    ROUND(AVG(cpu_usage_percent)::numeric, 1)               AS avg_cpu,
+                    ROUND(AVG(memory_usage_percent)::numeric, 1)            AS avg_memory,
+                    ROUND(AVG(disk_free_percent)::numeric, 1)               AS avg_disk_free
                 FROM events
                 {time_filter}
                 GROUP BY bucket
                 ORDER BY bucket ASC
-            """).format(time_filter=time_filter)
+            """).format(
+                bucket=pgsql.Literal(bucket_trunc),
+                time_filter=time_filter,
+            )
 
             rows = _exec_query(query, tuple(params) if params else None, endpoint="/metrics")
 
@@ -1033,7 +1121,7 @@ def get_metrics(start_time: Optional[str] = None, end_time: Optional[str] = None
             } for r in rows]
 
         metrics = _response_cache.get_or_set(
-            _cache_key("/metrics", start_time=start_time, end_time=end_time),
+            _cache_key("/metrics", start_time=start_time, end_time=end_time, window_minutes=window_minutes),
             API_CACHE_TTL_SECONDS,
             load_metrics,
         )
@@ -1045,6 +1133,7 @@ def get_metrics(start_time: Optional[str] = None, end_time: Optional[str] = None
         logger.error("/metrics error: %s", exc)
         _log_failure("/metrics", "endpoint", exc)
         _log_req("/metrics", (time.time() - t0) * 1000, "error")
+
         return []
 
 
@@ -1191,25 +1280,8 @@ def get_system_failures(
         return []
 
 
-@app.get("/system-metrics")
-def get_system_metrics() -> Dict:
-    t0      = time.time()
-    default = {"avg_cpu": 0.0, "avg_memory": 0.0, "avg_disk": 0.0}
-    try:
-        row = _exec_one("""
-            SELECT
-                ROUND(AVG(cpu_usage_percent)::numeric, 1)    AS avg_cpu,
-                ROUND(AVG(memory_usage_percent)::numeric, 1) AS avg_memory,
-                ROUND(AVG(disk_free_percent)::numeric, 1)    AS avg_disk
-            FROM events
-        """, endpoint="/system-metrics")
-        result = row if row else default
-        _log_req("/system-metrics", (time.time() - t0) * 1000, "ok")
-        return result
-    except Exception as exc:
-        logger.error("/system-metrics error: %s", exc)
-        _log_failure("/system-metrics", "endpoint", exc)
-        return default
+# Note: The accurate /system-metrics endpoint backed by system_heartbeats
+# is defined after /pipeline-health below.
 
 
 @app.get("/pipeline-health")
@@ -1231,6 +1303,20 @@ def get_pipeline_health() -> Dict:
         total_recent   = _i(eps_row.get("total_recent"))
         span_sec       = _f(eps_row.get("span_seconds"))
         events_per_sec = float(f"{total_recent / span_sec:.1f}") if span_sec > 0 else 0.0
+
+        # Compute EPS change vs. the prior 5-minute window for trend awareness
+        prev_eps_row = _exec_one("""
+            SELECT COUNT(*) AS total_prev,
+                   EXTRACT(EPOCH FROM (MAX(ingested_at) - MIN(ingested_at))) AS span_prev
+            FROM events WHERE ingested_at > NOW() - INTERVAL '10 minutes'
+                          AND ingested_at <= NOW() - INTERVAL '5 minutes'
+        """, endpoint="/pipeline-health/prev_eps")
+        prev_total = _i(prev_eps_row.get("total_prev"))
+        prev_span  = _f(prev_eps_row.get("span_prev"))
+        prev_eps   = prev_total / prev_span if prev_span > 0 else 0.0
+        eps_change_pct = 0
+        if prev_eps > 0:
+            eps_change_pct = int(round((events_per_sec - prev_eps) / prev_eps * 100))
 
         lat_row = _exec_one("""
             WITH ordered AS (
@@ -1291,7 +1377,7 @@ def get_pipeline_health() -> Dict:
         _log_req("/pipeline-health", (time.time() - t0) * 1000, "ok")
         return {
             "events_per_sec": events_per_sec,
-            "eps_change_pct": 0,
+            "eps_change_pct": eps_change_pct,
             "avg_latency_ms": avg_latency_ms,
             "kafka_lag":      kafka_lag,
             "lag_status":     lag_status,

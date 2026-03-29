@@ -150,7 +150,7 @@ interface DashboardProviderProps {
 
 export function DashboardProvider({ children }: DashboardProviderProps) {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h');
-  const [autoRefresh, setAutoRefresh] = useState<AutoRefresh>('10s');
+  const [autoRefresh, setAutoRefresh] = useState<AutoRefresh>('30s');
   const [selectedSystems, setSelectedSystems] = useState<string[]>([]);
   const [selectedSeverities, setSelectedSeverities] = useState<Severity[]>([]);
   const [selectedFaultTypes, setSelectedFaultTypes] = useState<string[]>([]);
@@ -208,7 +208,7 @@ export function DashboardProvider({ children }: DashboardProviderProps) {
         }),
         fetchSystems(),
         fetchAlerts(),
-        fetchMetrics(),
+        fetchMetrics(undefined, undefined, aggregateWindowMinutes),
         fetchDashboardMetrics(aggregateWindowMinutes),
         fetchSeverityDistribution(aggregateWindowMinutes),
         fetchFaultDistribution(aggregateWindowMinutes),

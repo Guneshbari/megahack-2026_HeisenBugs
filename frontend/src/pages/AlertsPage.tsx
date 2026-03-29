@@ -13,7 +13,7 @@ import {
 import SeverityBadge from '../components/shared/SeverityBadge';
 import { timeAgo, formatTimestamp, getActiveAlerts, getAcknowledgedAlerts } from '../data/mockData';
 import { useDashboard } from '../context/DashboardContext';
-import { createAlertRule } from '../lib/api';
+import { alertAction, createAlertRule } from '../lib/api';
 import type { Alert, Severity } from '../types/telemetry';
 
 type SortKey = 'severity' | 'system' | 'title' | 'age' | 'status';
@@ -44,7 +44,7 @@ function SortHeader({ label, sortId, activeSortKey, onToggleSort, align = 'left'
 const severityValue = { CRITICAL: 4, ERROR: 3, WARNING: 2, INFO: 1 };
 
 export default function AlertsPage() {
-  const { filteredAlerts, filteredEventsBySystemId } = useDashboard();
+  const { filteredAlerts, filteredEventsBySystemId, refreshTick: _refreshTick } = useDashboard();
   const [tab, setTab] = useState<'active' | 'acknowledged'>('active');
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -75,22 +75,21 @@ export default function AlertsPage() {
   const handleAction = async (action: 'acknowledge' | 'escalate', alert: Alert, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
-      const res = await fetch(`http://localhost:8000/alerts/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alert_id: alert.alert_id }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success) {
+      const data = await alertAction(action, alert.alert_id);
+      if (data.success) {
         showToast(`Alert ${action}d`, 'success');
+        // Re-fetch data from the server so the UI reflects true DB state
+        // The DashboardContext auto-refresh will pick this up on the next tick
+        // but we trigger an immediate re-evaluation by updating local alert state
         const updated = { ...alert, [action === 'acknowledge' ? 'acknowledged' : 'escalated']: true };
         if (selectedAlert?.alert_id === alert.alert_id) setSelectedAlert(updated);
-        Object.assign(alert, updated); // Optimistic memory mutation
       } else {
         showToast(`Failed to ${action}`, 'error');
       }
-    } catch {
-      showToast('Network error', 'error');
+    } catch (err) {
+      // alertAction throws on auth failure or network error
+      const msg = err instanceof Error ? err.message : 'Network error';
+      showToast(msg, 'error');
     }
   };
 

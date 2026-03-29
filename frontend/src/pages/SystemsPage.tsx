@@ -185,7 +185,7 @@ export default function SystemsPage() {
                 <SortHeader label="Last Seen" sortId="last_seen" activeSortKey={sortKey} onToggleSort={handleSort} />
                 <SortHeader label="CPU" sortId="cpu" activeSortKey={sortKey} onToggleSort={handleSort} align="right" />
                 <SortHeader label="Memory" sortId="memory" activeSortKey={sortKey} onToggleSort={handleSort} align="right" />
-                <SortHeader label="Disk" sortId="disk" activeSortKey={sortKey} onToggleSort={handleSort} align="right" />
+                <SortHeader label="Disk Free" sortId="disk" activeSortKey={sortKey} onToggleSort={handleSort} align="right" />
                 <SortHeader label="Active Alerts" sortId="alerts" activeSortKey={sortKey} onToggleSort={handleSort} align="right" />
                 <SortHeader label="Last Event" sortId="last_event" activeSortKey={sortKey} onToggleSort={handleSort} align="right" />
                 <th className="px-4 py-3 bg-bg-surface text-right w-24"></th>
@@ -206,36 +206,51 @@ export default function SystemsPage() {
                   const recentEvent = eventSummary?.latestEvent;
                   const isDegraded = system.status !== 'online';
                   
-                  return (
-                    <tr
-                      key={system.system_id}
-                      onClick={() => navigate(`/events?system=${system.system_id}`)}
-                      className={`hover:bg-bg-hover cursor-pointer transition-colors ${isDegraded ? 'bg-accent-red/5' : ''}`}
-                    >
-                      <td className="px-4 py-2.5">
-                        <div className="flex flex-col">
-                          <span className="text-[13px] font-semibold text-text-primary">{system.hostname}</span>
-                          <span className="text-[10px] font-mono text-text-muted">{system.system_id}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${status.color}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${status.bg}`} />
-                          {status.label}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-xs text-text-secondary">
-                        {timeAgo(system.last_seen)}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-text-secondary">
-                        {system.cpu_usage_percent.toFixed(1)}%
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-text-secondary">
-                        {system.memory_usage_percent.toFixed(1)}%
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-text-secondary">
-                        {system.disk_free_percent.toFixed(1)}%
-                      </td>
+                      const isStale = (() => {
+                        const updatedAt = system.last_updated_at ?? system.last_seen;
+                        if (!updatedAt) return false;
+                        return (Date.now() - new Date(updatedAt).getTime()) > 2 * 60 * 1000;
+                      })();
+                      const staleTitle = isStale ? ' (reading may be stale — collector not reporting)' : '';
+                      return (
+                        <tr
+                          key={system.system_id}
+                          onClick={() => navigate(`/events?system=${system.system_id}`)}
+                          className={`hover:bg-bg-hover cursor-pointer transition-colors ${isDegraded ? 'bg-accent-red/5' : ''}`}
+                        >
+                          <td className="px-4 py-2.5">
+                            <div className="flex flex-col">
+                              <span className="text-[13px] font-semibold text-text-primary">{system.hostname}</span>
+                              <span className="text-[10px] font-mono text-text-muted">{system.system_id}</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${status.color}`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${status.bg}`} />
+                              {status.label}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5 text-xs text-text-secondary">
+                            {timeAgo(system.last_seen)}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono text-xs text-text-secondary" title={`CPU usage${staleTitle}`}>
+                            <span className="inline-flex items-center justify-end gap-1">
+                              {isStale && <span className="w-1.5 h-1.5 rounded-full bg-accent-amber opacity-70" title="Reading may be stale" />}
+                              {system.cpu_usage_percent.toFixed(1)}%
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono text-xs text-text-secondary" title={`Memory usage${staleTitle}`}>
+                            <span className="inline-flex items-center justify-end gap-1">
+                              {isStale && <span className="w-1.5 h-1.5 rounded-full bg-accent-amber opacity-70" title="Reading may be stale" />}
+                              {system.memory_usage_percent.toFixed(1)}%
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono text-xs text-text-secondary" title={`Disk free${staleTitle}`}>
+                            <span className="inline-flex items-center justify-end gap-1">
+                              {isStale && <span className="w-1.5 h-1.5 rounded-full bg-accent-amber opacity-70" title="Reading may be stale" />}
+                              {system.disk_free_percent.toFixed(1)}% free
+                            </span>
+                          </td>
                       <td className="px-4 py-2.5 text-right">
                         {activeAlerts > 0 ? (
                           <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded bg-accent-red/10 text-accent-red text-xs font-bold">

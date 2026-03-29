@@ -135,10 +135,15 @@ export async function fetchRecentAlerts(): Promise<Alert[]> {
   return fetchJSON<Alert[]>('/alerts/recent');
 }
 
-export async function fetchMetrics(startTime?: string, endTime?: string): Promise<MetricPoint[]> {
-  const query: Record<string, string> = {};
+export async function fetchMetrics(
+  startTime?: string,
+  endTime?: string,
+  windowMinutes?: number,
+): Promise<MetricPoint[]> {
+  const query: Record<string, string | number | undefined> = {};
   if (startTime) query.start_time = startTime;
   if (endTime) query.end_time = endTime;
+  if (windowMinutes && !startTime && !endTime) query.window_minutes = windowMinutes;
   return fetchJSON<MetricPoint[]>('/metrics', query);
 }
 
@@ -237,6 +242,20 @@ export async function executeSystemCommand(systemId: string, command: string): P
     body: JSON.stringify({ system_id: systemId, command }),
   });
   return res.json();
+}
+
+export async function alertAction(
+  action: 'acknowledge' | 'escalate',
+  alertId: string,
+): Promise<{ success: boolean }> {
+  const headers = await buildHeaders();
+  const res = await fetch(buildEndpoint(`/alerts/${action}`), {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ alert_id: alertId }),
+  });
+  const data = await res.json().catch(() => ({ success: false }));
+  return data;
 }
 
 export async function createAlertRule(ruleName: string, condition: string, severity: string, threshold: number): Promise<{ success: boolean }> {

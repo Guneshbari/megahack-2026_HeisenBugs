@@ -497,12 +497,21 @@ def get_local_ip() -> str:
 # ============================================================================
 
 def get_resource_snapshot() -> Dict:
-    """Single resource snapshot — call once per cycle, not per event."""
+    """Single resource snapshot — call once per cycle, not per event.
+
+    OS-aware disk path:
+      - Windows: queries C:\ (the system drive, where Task Manager reports usage)
+      - Linux/macOS: queries / (root)
+    CPU interval=1.0 matches the Windows Task Manager 1-second averaging window.
+    Using interval=0.1 produces unreliable spike readings.
+    """
     try:
         mem  = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
+        # Determine the correct disk path per OS to avoid silent zero-returns on Windows
+        disk_path = 'C:\\' if sys.platform.startswith('win') else '/'
+        disk = psutil.disk_usage(disk_path)
         return {
-            'cpu_usage_percent':    round(psutil.cpu_percent(interval=0.1), 2),
+            'cpu_usage_percent':    round(psutil.cpu_percent(interval=1.0), 2),
             'memory_usage_percent': round((mem.used / mem.total) * 100, 2),
             'disk_free_percent':    round(100.0 - disk.percent, 2)
         }

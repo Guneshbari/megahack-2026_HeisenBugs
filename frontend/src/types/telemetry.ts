@@ -32,9 +32,12 @@ export interface SystemInfo {
   status: SystemStatus;
   cpu_usage_percent: number;
   memory_usage_percent: number;
+  /** Percentage of disk space that is FREE (not used). */
   disk_free_percent: number;
   os_version: string;
   last_seen: string;
+  /** ISO timestamp of when the resource metrics (CPU/RAM/disk) were last recorded. */
+  last_updated_at?: string;
   ip_address: string;
   total_events: number;
 }
