@@ -7,14 +7,21 @@ import {
   getTotalEventCount,
 } from '../../data/mockData';
 import { fetchRecentAlerts } from '../../lib/api';
-import { useDashboard, TIME_RANGE_LABELS, REFRESH_LABELS, type TimeRange, type AutoRefresh } from '../../context/DashboardContext';
+import { TIME_RANGE_LABELS, REFRESH_LABELS, type TimeRange, type AutoRefresh } from '../../lib/dashboardDerived';
+import { useDashboardStore } from '../../store/dashboardStore';
 import { useAuth } from '../../context/AuthContext';
 
 const TIME_RANGES: TimeRange[] = ['5m', '15m', '1h', '6h', '24h'];
 const REFRESH_OPTIONS: AutoRefresh[] = ['off', '5s', '10s', '30s', '1m'];
 
 export default function Topbar() {
-  const { systems, alerts, allEvents, timeRange, setTimeRange, autoRefresh, setAutoRefresh } = useDashboard();
+  const systems = useDashboardStore((s) => s.systems);
+  const alerts = useDashboardStore((s) => s.alerts);
+  const allEvents = useDashboardStore((s) => s.allEvents);
+  const timeRange = useDashboardStore((s) => s.timeRange);
+  const setTimeRange = useDashboardStore((s) => s.setTimeRange);
+  const autoRefresh = useDashboardStore((s) => s.autoRefresh);
+  const setAutoRefresh = useDashboardStore((s) => s.setAutoRefresh);
   const online = getOnlineSystems(systems);
   const degraded = getDegradedSystems(systems);
   const criticals = getCriticalAlertCount(alerts);

@@ -8,10 +8,10 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { formatTimeShort } from '../../data/mockData';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 
 export default function EventRateChart() {
-  const { metrics } = useDashboard();
+  const metrics = useDashboardStore((s) => s.metrics);
   const data = metrics.map((m) => ({
     time: formatTimeShort(m.timestamp),
     events: m.event_count,

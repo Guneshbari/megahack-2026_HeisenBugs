@@ -3,13 +3,13 @@ import { Radio } from 'lucide-react';
 import SeverityBadge from './SeverityBadge';
 import EventDetailInspector from './EventDetailInspector';
 import { formatTimestamp } from '../../data/mockData';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import type { TelemetryEvent } from '../../types/telemetry';
 
 const MAX_VISIBLE = 12;
 
 export default function LiveEventStream() {
-  const { filteredEvents } = useDashboard();
+  const filteredEvents = useDashboardStore((s) => s.filteredEvents);
   const sortedRecentEvents = useMemo(
     () => [...filteredEvents]
       .sort((a, b) => new Date(b.event_time).getTime() - new Date(a.event_time).getTime())

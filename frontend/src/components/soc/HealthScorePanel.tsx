@@ -7,7 +7,7 @@
  */
 import { useMemo } from 'react';
 import { useSignalStore, computeHealthScore } from '../../store/signalStore';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import { useUIStore } from '../../store/uiStore';
 
 function scoreColor(score: number): string {
@@ -36,7 +36,7 @@ interface SystemScore {
 
 export default function HealthScorePanel() {
   const events  = useSignalStore((s) => s.events);
-  const { systems } = useDashboard();
+  const systems = useDashboardStore((s) => s.systems);
   const highlightedSystems = useUIStore((s) => s.highlightedSystems);
   const hasHighlight = highlightedSystems.length > 0;
 

@@ -5,7 +5,7 @@
  * Color-coded values only — no colored backgrounds.
  */
 import { useMemo } from 'react';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import { useSignalStore } from '../../store/signalStore';
 import { useIncidentStore } from '../../store/incidentStore';
 
@@ -16,7 +16,9 @@ interface KpiItem {
 }
 
 export default function KpiStrip() {
-  const { systems, filteredAlerts, pipelineHealth } = useDashboard();
+  const systems = useDashboardStore((s) => s.systems);
+  const filteredAlerts = useDashboardStore((s) => s.filteredAlerts);
+  const pipelineHealth = useDashboardStore((s) => s.pipelineHealth);
   const isConnected    = useSignalStore((s) => s.isConnected);
   const signalCount    = useSignalStore((s) => s.signals.length);
   const incidentCount  = useIncidentStore((s) => s.incidents.length);

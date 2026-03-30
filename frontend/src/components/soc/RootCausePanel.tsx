@@ -16,7 +16,9 @@ import { useMemo } from 'react';
 import { useIncidentStore } from '../../store/incidentStore';
 import type { Incident } from '../../store/incidentStore';
 import type { Correlation } from '../../lib/correlationEngine';
-import IncidentTimeline from './IncidentTimeline';
+import IncidentTimeline     from './IncidentTimeline';
+import ForecastBadge        from './ForecastBadge';
+import RemediationControls  from './RemediationControls';
 
 function confidenceColor(c: number): string {
   if (c >= 0.80) return '#DC2626';
@@ -159,6 +161,14 @@ export default function RootCausePanel({ incident }: { incident: Incident }) {
 
   return (
     <div style={{ padding: '8px 12px', background: '#080d16', borderBottom: '1px solid #1E293B' }}>
+
+      {/* Forecast badge — hidden for nominal systems */}
+      {incident.systems[0] && (
+        <div style={{ marginBottom: 6 }}>
+          <ForecastBadge systemId={incident.systems[0]} />
+        </div>
+      )}
+
       {/* ROOT CAUSE section */}
       <div style={{
         fontFamily:    'JetBrains Mono, monospace',
@@ -184,6 +194,9 @@ export default function RootCausePanel({ incident }: { incident: Incident }) {
           />
         ))
       )}
+
+      {/* REMEDIATION section */}
+      <RemediationControls incident={incident} />
 
       {/* TIMELINE section */}
       <div style={{

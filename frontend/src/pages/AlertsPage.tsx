@@ -5,7 +5,7 @@
  */
 import { useState, useMemo, useCallback } from 'react';
 import { Check, ArrowUpRight, Plus, X } from 'lucide-react';
-import { useDashboard } from '../context/DashboardContext';
+import { useDashboardStore } from '../store/dashboardStore';
 import { alertAction, createAlertRule } from '../lib/api';
 import type { Alert, Severity } from '../types/telemetry';
 
@@ -30,7 +30,7 @@ type Tab = 'active' | 'acknowledged';
 type SortKey = 'severity' | 'age' | 'system';
 
 export default function AlertsPage() {
-  const { filteredAlerts } = useDashboard();
+  const filteredAlerts = useDashboardStore((s) => s.filteredAlerts);
 
   const [tab, setTab]                 = useState<Tab>('active');
   const [sortKey, setSortKey]         = useState<SortKey>('severity');

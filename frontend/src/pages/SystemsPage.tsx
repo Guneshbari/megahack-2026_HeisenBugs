@@ -6,7 +6,7 @@
  * Hover highlights system; click shows detail modal inline.
  */
 import { useState, useMemo } from 'react';
-import { useDashboard } from '../context/DashboardContext';
+import { useDashboardStore } from '../store/dashboardStore';
 import { useUIStore } from '../store/uiStore';
 import type { SystemStatus } from '../types/telemetry';
 
@@ -50,7 +50,7 @@ function timeAgo(ts: string): string {
 type SortKey = 'hostname' | 'status' | 'cpu' | 'mem' | 'events';
 
 export default function SystemsPage() {
-  const { systems } = useDashboard();
+  const systems = useDashboardStore((s) => s.systems);
   const setHighlighted = useUIStore((s) => s.setHighlightedSystem);
   const highlighted    = useUIStore((s) => s.highlightedSystem);
 

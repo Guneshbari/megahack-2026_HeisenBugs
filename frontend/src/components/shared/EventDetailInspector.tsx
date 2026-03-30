@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { formatTimestamp } from '../../data/mockData';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import type { TelemetryEvent } from '../../types/telemetry';
 
 interface EventDetailInspectorProps {
@@ -18,8 +18,14 @@ interface EventDetailInspectorProps {
   readonly onClose: () => void;
 }
 
+const SectionHeader = ({ title }: { title: string }) => (
+  <h4 className="flex items-center gap-2 text-[10px] font-bold text-[#6B7C93] uppercase tracking-wider mb-2 pb-1 border-b border-[#1F2A37]">
+    {title}
+  </h4>
+);
+
 export default function EventDetailInspector({ event, onClose }: EventDetailInspectorProps) {
-  const { filteredEventsBySystemId } = useDashboard();
+  const filteredEventsBySystemId = useDashboardStore((s) => s.filteredEventsBySystemId);
   if (!event) return null;
 
   const systemEvents = filteredEventsBySystemId[event.system_id] ?? [];
@@ -53,9 +59,10 @@ export default function EventDetailInspector({ event, onClose }: EventDetailInsp
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#111927]">
-        {/* Core Description + Severity */}
-        <div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-[#111927]">
+        {/* INFO Section */}
+        <section>
+          <SectionHeader title="INFO" />
           <div className="flex items-center gap-2 mb-2">
             <span className={`soc-badge soc-badge-${event.severity.toLowerCase()} w-[56px] justify-center`}>{event.severity}</span>
             <span className="text-[10px] text-[#6B7C93] font-mono">{formatTimestamp(event.event_time)}</span>
@@ -63,24 +70,27 @@ export default function EventDetailInspector({ event, onClose }: EventDetailInsp
           <p className="text-[13px] font-medium text-[#E6EDF3] leading-relaxed">
             {event.fault_description || event.fault_type}
           </p>
-        </div>
+        </section>
 
-        {/* Diagnostics Table */}
-        <div className="space-y-1 bg-[#0A0F14] border border-[#1F2A37] rounded p-2">
-          {fields.map((f) => (
-            <div key={f.label} className="flex justify-between py-1 border-b border-[#1F2A37] last:border-0 text-[11px]">
-              <span className="text-[#6B7C93]">{f.label}</span>
-              <span className={`text-[#E6EDF3] ${f.mono ? 'font-mono text-[10px]' : 'font-medium'}`}>
-                {f.value}
-              </span>
-            </div>
-          ))}
-        </div>
+        {/* EVENT Section */}
+        <section>
+          <SectionHeader title="EVENT" />
+          <div className="space-y-1 bg-[#0A0F14] border border-[#1F2A37] rounded p-2">
+            {fields.map((f) => (
+              <div key={f.label} className="flex justify-between py-1 border-b border-[#1F2A37] last:border-0 text-[11px]">
+                <span className="text-[#6B7C93]">{f.label}</span>
+                <span className={`text-[#E6EDF3] ${f.mono ? 'font-mono text-[10px]' : 'font-medium'}`}>
+                  {f.value}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
 
-        {/* Correlation Chart */}
-        {correlationData.length > 0 && (
-          <div>
-            <h4 className="text-[10px] font-bold text-[#6B7C93] uppercase tracking-wider mb-2">Resource Activity</h4>
+        {/* METRICS Section */}
+        <section>
+          <SectionHeader title="METRICS" />
+          {correlationData.length > 0 ? (
             <div className="h-[140px] w-full border border-[#1F2A37] rounded bg-[#0A0F14] p-2">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={correlationData} margin={{ top: 5, right: 0, left: -25, bottom: 0 }}>
@@ -96,22 +106,26 @@ export default function EventDetailInspector({ event, onClose }: EventDetailInsp
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="flex items-center justify-center p-4 border border-dashed border-[#1F2A37] rounded text-[10px] text-[#475569] font-mono">
+              NO METRICS AVAILABLE
+            </div>
+          )}
+        </section>
 
-        {/* JSON Payload */}
-        {event.diagnostic_context && Object.keys(event.diagnostic_context).length > 0 && (
-          <div>
-            <details className="cursor-pointer group mt-2">
-              <summary className="text-[11px] text-[#6B7C93] uppercase tracking-wider font-mono font-semibold select-none group-hover:text-[#E6EDF3] transition-colors mb-2">
-                Raw Payload <span className="text-[9px] opacity-70">▼</span>
-              </summary>
-              <pre className="text-[10px] text-[#9FB3C8] font-mono bg-[#0A0F14] border border-[#1F2A37] rounded p-3 overflow-x-auto">
-                {JSON.stringify(event.diagnostic_context, null, 2)}
-              </pre>
-            </details>
-          </div>
-        )}
+        {/* RAW DATA Section */}
+        <section>
+          <SectionHeader title="RAW DATA" />
+          {event.diagnostic_context && Object.keys(event.diagnostic_context).length > 0 ? (
+            <pre className="text-[10px] text-[#9FB3C8] font-mono bg-[#0A0F14] border border-[#1F2A37] rounded p-3 overflow-x-auto">
+              {JSON.stringify(event.diagnostic_context, null, 2)}
+            </pre>
+          ) : (
+            <div className="flex items-center justify-center p-4 border border-dashed border-[#1F2A37] rounded text-[10px] text-[#475569] font-mono">
+              NO DIAGNOSTIC CONTEXT
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

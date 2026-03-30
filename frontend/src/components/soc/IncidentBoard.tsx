@@ -103,7 +103,7 @@ function ImpactRow({ incident }: { incident: Incident }) {
       background: '#0A1018', borderBottom: '1px solid #1E293B',
       fontFamily: 'JetBrains Mono, monospace',
     }}>
-      <span style={{ fontSize: 9, color: '#334155', textTransform: 'uppercase', alignSelf: 'center' }}>IMPACT</span>
+      <span className="soc-label" style={{ alignSelf: 'center' }}>IMPACT</span>
       <ImpactKpi label="SYSTEMS" value={String(incident.impact.systems_affected)}
         color={incident.impact.systems_affected > 2 ? '#F97316' : '#94A3B8'} />
       <ImpactKpi label="AVG CPU" value={incident.impact.avg_cpu}
@@ -118,8 +118,8 @@ function ImpactRow({ incident }: { incident: Incident }) {
 function ImpactKpi({ label, value, color }: { label: string; value: string; color: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-      <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 8, color: '#334155', textTransform: 'uppercase' }}>{label}</span>
-      <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, fontWeight: 700, color }}>{value}</span>
+      <span className="soc-label">{label}</span>
+      <span className="soc-value" style={{ color }}>{value}</span>
     </div>
   );
 }
@@ -160,7 +160,7 @@ function LifecycleControls({ incident }: { incident: Incident }) {
       background: '#08101a', borderBottom: '1px solid #1E293B',
       alignItems: 'center',
     }}>
-      <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 8, color: '#334155', textTransform: 'uppercase', marginRight: 4 }}>
+      <span className="soc-label" style={{ marginRight: 4 }}>
         LIFECYCLE
       </span>
       {/* Status pill */}
@@ -212,7 +212,7 @@ const IncidentRow = React.memo(({
       onClick={onClick}
       style={{
         display: 'flex', alignItems: 'center', gap: 6,
-        padding: '0 10px', height: 38, minHeight: 38, flexShrink: 0,
+        padding: '0 10px', height: 40, minHeight: 40, flexShrink: 0,
         borderBottom: '1px solid #151f2e',
         borderLeft: `2px solid ${SEV_BORDER[incident.severity]}`,
         background: isSelected ? '#1E3A5F' : 'transparent',
@@ -352,7 +352,7 @@ export default function IncidentBoard() {
         background: '#080d16', flexShrink: 0, borderBottom: '1px solid #1E293B',
       }}>
         {['SEV', 'PRI', 'SRC', 'TITLE', '↑', 'LC', 'CONF'].map((h) => (
-          <span key={h} style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 8, color: '#334155', textTransform: 'uppercase' }}>
+          <span key={h} className="soc-label">
             {h}
           </span>
         ))}

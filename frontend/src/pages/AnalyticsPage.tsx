@@ -10,7 +10,7 @@
 import { useMemo } from 'react';
 import type { EChartsOption } from 'echarts';
 import { EChart } from '../components/soc/EChart';
-import { useDashboard } from '../context/DashboardContext';
+import { useDashboardStore } from '../store/dashboardStore';
 
 const DARK   = '#0B1220';
 const PANEL  = '#0F172A';
@@ -161,7 +161,9 @@ function buildResourceOption(metrics: any[]): EChartsOption {
 }
 
 export default function AnalyticsPage() {
-  const { metrics, severityDistribution, faultDistribution } = useDashboard();
+  const metrics = useDashboardStore((s) => s.metrics);
+  const severityDistribution = useDashboardStore((s) => s.severityDistribution);
+  const faultDistribution = useDashboardStore((s) => s.faultDistribution);
 
   const freqOption     = useMemo(() => buildFreqOption(metrics),              [metrics]);
   const sevOption      = useMemo(() => buildSevOption(severityDistribution),  [severityDistribution]);

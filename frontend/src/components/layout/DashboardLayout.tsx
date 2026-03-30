@@ -5,8 +5,8 @@
  * Topbar: 32px single-line strip
  * Main: full remaining height, zero padding, scroll per-page
  */
-import { Outlet } from 'react-router-dom';
-import { NavLink } from 'react-router-dom';
+import { Outlet, NavLink } from 'react-router-dom';
+import { useEffect } from 'react';
 import {
   LayoutDashboard,
   Search,
@@ -17,7 +17,7 @@ import {
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import { useSignalStore } from '../../store/signalStore';
 
 const NAV_ITEMS = [
@@ -30,8 +30,30 @@ const NAV_ITEMS = [
 
 export default function DashboardLayout() {
   const auth = useAuth();
-  const { filteredAlerts, pipelineHealth, allEvents, systems } = useDashboard();
+  const filteredAlerts = useDashboardStore((s) => s.filteredAlerts);
+  const pipelineHealth = useDashboardStore((s) => s.pipelineHealth);
+  const allEvents = useDashboardStore((s) => s.allEvents);
+  const systems = useDashboardStore((s) => s.systems);
+  const loadData = useDashboardStore((s) => s.loadData);
+  const tickRefresh = useDashboardStore((s) => s.tickRefresh);
+  const autoRefresh = useDashboardStore((s) => s.autoRefresh);
   const isConnected = useSignalStore((s) => s.isConnected);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    if (!autoRefresh || autoRefresh === 'off') return;
+    // Map autoRefresh to ms manually or import REFRESH_MS from lib
+    const msMap: Record<string, number> = { '5s': 5000, '10s': 10000, '30s': 30000, '1m': 60000 };
+    const interval = msMap[autoRefresh];
+    if (!interval) return;
+    const id = setInterval(() => {
+      tickRefresh();
+    }, interval);
+    return () => clearInterval(id);
+  }, [autoRefresh, tickRefresh]);
 
   const criticalCount = filteredAlerts.filter((a) => !a.acknowledged && a.severity === 'CRITICAL').length;
 

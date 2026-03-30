@@ -12,7 +12,7 @@
 import { useMemo } from 'react';
 import type { EChartsOption } from 'echarts';
 import { EChart } from './EChart';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import type { MetricPoint } from '../../types/telemetry';
 
 const DARK_BG    = '#0B1220';
@@ -140,7 +140,7 @@ function buildOption(metrics: MetricPoint[]): EChartsOption {
 }
 
 export default function MetricsCharts() {
-  const { metrics } = useDashboard();
+  const metrics = useDashboardStore((s) => s.metrics);
 
   const option = useMemo(() => buildOption(metrics), [metrics]);
 

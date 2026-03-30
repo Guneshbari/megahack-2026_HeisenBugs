@@ -9,10 +9,10 @@ import {
   Legend,
 } from 'recharts';
 import { formatTimeShort } from '../../data/mockData';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 
 export default function ResourceTrendChart() {
-  const { metrics } = useDashboard();
+  const metrics = useDashboardStore((s) => s.metrics);
   const data = metrics.map((m) => ({
     time: formatTimeShort(m.timestamp),
     CPU: m.avg_cpu,

@@ -9,7 +9,7 @@
  *  - Click selects incident via uiStore
  *  - No animations longer than 150ms
  */
-import { useRef, useMemo, useCallback, useState } from 'react';
+import { useRef, useMemo, useCallback, useState, memo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useSignalStore } from '../../store/signalStore';
 import { useUIStore } from '../../store/uiStore';
@@ -30,18 +30,20 @@ const SEV_TEXT: Record<Severity, string> = {
   INFO:     'text-[#38BDF8]',
 };
 
-const ROW_HEIGHT = 28;
+const ROW_HEIGHT = 40;
 
-const SignalRow = ({ signal, isSelected, onClick }: {
+const SignalRow = memo(({ signal, isSelected, onClick }: {
   signal:     GroupedSignal;
   isSelected: boolean;
   onClick:    () => void;
-}) => (
-  <div
-    onClick={onClick}
-    className={`soc-signal-row ${SEV_BORDER[signal.severity]} ${isSelected ? 'bg-[#1E3A5F]' : ''}`}
-    style={{ paddingLeft: 8, paddingRight: 6 }}
-  >
+}) => {
+  const isRecent = Date.now() - new Date(signal.lastSeen).getTime() < 60000;
+  return (
+    <div
+      onClick={onClick}
+      className={`soc-signal-row ${SEV_BORDER[signal.severity]} ${isSelected ? 'bg-[#1E3A5F]' : ''}`}
+      style={{ paddingLeft: 8, paddingRight: 6, opacity: isSelected || isRecent ? 1 : 0.65 }}
+    >
     {/* Fault type label */}
     <span className={`font-mono text-[11px] font-medium flex-1 truncate ${SEV_TEXT[signal.severity]}`}>
       {signal.fault_type}
@@ -64,7 +66,8 @@ const SignalRow = ({ signal, isSelected, onClick }: {
       {signal.windowLabel}
     </span>
   </div>
-);
+  );
+});
 
 export default function SmartEventStream() {
   const allSignals        = useSignalStore((s) => s.signals);

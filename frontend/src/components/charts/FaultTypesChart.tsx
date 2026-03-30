@@ -7,15 +7,12 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { getTopFaultTypes } from '../../data/mockData';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 
 export default function FaultTypesChart() {
-  const { allEvents, faultDistribution, canUseAggregateViews } = useDashboard();
-  const data = canUseAggregateViews ? faultDistribution.slice(0, 5) : getTopFaultTypes(allEvents);
-  const subtitle = canUseAggregateViews
-    ? 'Most common categories across the selected time range'
-    : 'Most common categories from the recent event sample';
+  const faultDistribution = useDashboardStore((s) => s.faultDistribution);
+  const data = faultDistribution.slice(0, 5);
+  const subtitle = 'Most common categories across the selected time range';
 
   return (
     <div className="glass-panel-solid rounded-md border border-border p-4 bg-bg-surface">

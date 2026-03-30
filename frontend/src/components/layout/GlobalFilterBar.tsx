@@ -1,6 +1,6 @@
 import { X, Search, Filter, ChevronDown } from 'lucide-react';
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import type { Severity } from '../../types/telemetry';
 
 const ALL_SEVERITIES: Severity[] = ['CRITICAL', 'ERROR', 'WARNING', 'INFO'];
@@ -13,15 +13,19 @@ const SEVERITY_COLORS: Record<Severity, string> = {
 };
 
 export default function GlobalFilterBar() {
-  const {
-    systems,
-    faultDistribution,
-    selectedSystems, setSelectedSystems,
-    selectedSeverities, setSelectedSeverities,
-    selectedFaultTypes, setSelectedFaultTypes,
-    searchQuery, setSearchQuery,
-    clearFilters, hasActiveFilters,
-  } = useDashboard();
+  const systems = useDashboardStore(s => s.systems);
+  const faultDistribution = useDashboardStore(s => s.faultDistribution);
+  const selectedSystems = useDashboardStore(s => s.selectedSystems);
+  const setSelectedSystems = useDashboardStore(s => s.setSelectedSystems);
+  const selectedSeverities = useDashboardStore(s => s.selectedSeverities);
+  const setSelectedSeverities = useDashboardStore(s => s.setSelectedSeverities);
+  const selectedFaultTypes = useDashboardStore(s => s.selectedFaultTypes);
+  const setSelectedFaultTypes = useDashboardStore(s => s.setSelectedFaultTypes);
+  const searchQuery = useDashboardStore(s => s.searchQuery);
+  const setSearchQuery = useDashboardStore(s => s.setSearchQuery);
+  const clearFilters = useDashboardStore(s => s.clearFilters);
+
+  const hasActiveFilters = selectedSystems.length > 0 || selectedSeverities.length > 0 || selectedFaultTypes.length > 0 || searchQuery !== '';
 
   // Use authoritative inventory + aggregate distributions so quiet systems still appear.
   const ALL_FAULT_TYPES = useMemo(

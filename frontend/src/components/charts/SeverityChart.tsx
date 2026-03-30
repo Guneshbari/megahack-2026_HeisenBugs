@@ -6,8 +6,7 @@ import {
   Tooltip,
   Legend,
 } from 'recharts';
-import { getSeverityDistribution } from '../../data/mockData';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 import type { Severity } from '../../types/telemetry';
 
 const COLORS: Record<Severity, string> = {
@@ -18,11 +17,9 @@ const COLORS: Record<Severity, string> = {
 };
 
 export default function SeverityChart() {
-  const { allEvents, severityDistribution, canUseAggregateViews } = useDashboard();
-  const data = canUseAggregateViews ? severityDistribution : getSeverityDistribution(allEvents);
-  const subtitle = canUseAggregateViews
-    ? 'Server-backed breakdown for the selected time range'
-    : 'Breakdown from the recent event sample';
+  const severityDistribution = useDashboardStore((s) => s.severityDistribution);
+  const data = severityDistribution;
+  const subtitle = 'Server-backed breakdown for the selected time range';
 
   return (
     <div className="glass-panel-solid rounded-md border border-border p-4 bg-bg-surface">

@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 
 const levelColors: Record<string, { bg: string; border: string; text: string; glow: string }> = {
   healthy: { bg: 'bg-[#22c55e]/10', border: 'border-[#22c55e]/30', text: 'text-[#22c55e]', glow: '' },
@@ -10,7 +10,8 @@ const levelColors: Record<string, { bg: string; border: string; text: string; gl
 
 export default function SystemHealthHeatmap() {
   const navigate = useNavigate();
-  const { filteredSystems, filteredSystemEventSummaries } = useDashboard();
+  const filteredSystems = useDashboardStore((s) => s.filteredSystems);
+  const filteredSystemEventSummaries = useDashboardStore((s) => s.filteredSystemEventSummaries);
 
   const systemHealth = filteredSystems.map((s) => ({
     ...s,

@@ -1,12 +1,16 @@
 import { useMemo, useState } from 'react';
 import { Activity, Database, Server, Zap, TrendingUp, BarChart3, Cpu } from 'lucide-react';
 import { Area, AreaChart, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, LineChart, Line } from 'recharts';
-import { useDashboard } from '../../context/DashboardContext';
+import { useDashboardStore } from '../../store/dashboardStore';
 
 type PanelTab = 'overview' | 'kafka' | 'system';
 
 export default function PipelineHealthPanel() {
-  const { systems, metrics, pipelineHealth, pipelineHealthError, topSystemsByEventVolume } = useDashboard();
+  const systems = useDashboardStore((s) => s.systems);
+  const metrics = useDashboardStore((s) => s.metrics);
+  const pipelineHealth = useDashboardStore((s) => s.pipelineHealth);
+  const pipelineHealthError = useDashboardStore((s) => s.pipelineHealthError);
+  const topSystemsByEventVolume = useDashboardStore((s) => s.topSystemsByEventVolume);
   const [activeTab, setActiveTab] = useState<PanelTab | null>(null);
 
   const eps = pipelineHealth?.events_per_sec ?? 0;

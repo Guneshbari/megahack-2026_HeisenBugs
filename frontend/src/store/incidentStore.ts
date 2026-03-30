@@ -15,6 +15,9 @@ import { create } from 'zustand';
 import type { Severity, MLPrediction, FeatureSnapshot } from '../types/telemetry';
 import type { GroupedSignal } from './signalStore';
 import { correlate, type Correlation, type CorrelationInputs } from '../lib/correlationEngine';
+// Deferred imports used at call-time to avoid circular init-time dependency
+// useForecastStore  → forecastStore → forecastEngine (no cycle)
+// useFeedbackStore  → feedbackStore → imports Incident type only (type-erased at runtime)
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -303,6 +306,32 @@ export function deriveIncidents(
   });
 }
 
+// ── Forecast-based priority boost ────────────────────────────────────
+// Reads forecastStore at derivation time (deferred import — avoids init cycle).
+// Systems with risk_level === 'imminent' get +20 pts and at least MEDIUM label.
+
+async function applyForecastBoost(incidents: Incident[]): Promise<Incident[]> {
+  try {
+    const { useForecastStore } = await import('./forecastStore');
+    const forecasts = useForecastStore.getState().forecasts;
+    const imminentIds = new Set(
+      forecasts.filter((f) => f.risk_level === 'imminent').map((f) => f.system_id),
+    );
+    if (imminentIds.size === 0) return incidents;
+
+    return incidents.map((inc) => {
+      if (!inc.systems.some((s) => imminentIds.has(s))) return inc;
+      const boostedScore = inc.priority_score + 20;
+      const boostedLabel: PriorityLabel =
+        inc.priority_label === 'LOW'    ? 'MEDIUM' :
+        inc.priority_label === 'MEDIUM' ? 'HIGH'   : inc.priority_label;
+      return { ...inc, priority_score: boostedScore, priority_label: boostedLabel };
+    });
+  } catch {
+    return incidents;  // fallback: no boost if store unavailable
+  }
+}
+
 // ── Store ────────────────────────────────────────────────────────────
 
 interface IncidentState {
@@ -334,9 +363,18 @@ export const useIncidentStore = create<IncidentState>((set, get) => ({
   showLowPriority:   false,
 
   deriveAll: (signals, mlPredictions, featureSnapshots, avgCpu) => {
+    // Guard: skip if inputs haven't changed meaningfully
+    const prevIncidents = get().incidents;
+    if (
+      signals.length === 0 &&
+      mlPredictions.length === 0 &&
+      featureSnapshots.length === 0 &&
+      prevIncidents.length === 0
+    ) return;
+
     // Preserve existing lifecycle states across re-derivations
     const prevLifecycles = new Map(
-      get().incidents.map((i) => [i.incident_id, {
+      prevIncidents.map((i) => [i.incident_id, {
         lifecycle:       i.lifecycle,
         acknowledged_at: i.acknowledged_at,
         resolved_at:     i.resolved_at,
@@ -346,17 +384,22 @@ export const useIncidentStore = create<IncidentState>((set, get) => ({
     const raw = deriveIncidents(signals, mlPredictions, featureSnapshots);
 
     // Restore lifecycle state for incidents that already existed
-    const incidents = raw.map((inc) => {
+    const withLifecycle = raw.map((inc) => {
       const prev = prevLifecycles.get(inc.incident_id);
       if (!prev) return inc;
       return { ...inc, ...prev };
     });
 
-    const corrInput: CorrelationInputs = { incidents, mlPredictions, featureSnapshots, avgCpu };
-    const correlations  = correlate(corrInput);
-    const systemHealthIndex = computeSystemHealthIndex(incidents, signals, mlPredictions);
+    const corrInput: CorrelationInputs = { incidents: withLifecycle, mlPredictions, featureSnapshots, avgCpu };
+    const correlations      = correlate(corrInput);
+    const systemHealthIndex = computeSystemHealthIndex(withLifecycle, signals, mlPredictions);
 
-    set({ incidents, correlations, systemHealthIndex });
+    // Apply async forecast boost then commit — UI updates once when boost resolves
+    applyForecastBoost(withLifecycle).then((incidents) => {
+      set({ incidents, correlations, systemHealthIndex });
+    }).catch(() => {
+      set({ incidents: withLifecycle, correlations, systemHealthIndex });
+    });
   },
 
   acknowledgeIncident: (id) => {
@@ -370,6 +413,13 @@ export const useIncidentStore = create<IncidentState>((set, get) => ({
   },
 
   resolveIncident: (id) => {
+    const incident = get().incidents.find((i) => i.incident_id === id);
+    // Feed resolution data back to feedbackStore (deferred import — avoids init cycle)
+    if (incident) {
+      import('./feedbackStore').then(({ useFeedbackStore }) => {
+        useFeedbackStore.getState().recordResolution(incident);
+      }).catch(() => {/* non-critical */});
+    }
     set((s) => ({
       incidents: s.incidents.map((i) =>
         i.incident_id === id

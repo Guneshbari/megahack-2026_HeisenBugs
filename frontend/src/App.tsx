@@ -1,6 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { DashboardProvider } from './context/DashboardContext';
 import DashboardLayout from './components/layout/DashboardLayout';
 import OverviewPage from './pages/OverviewPage';
 import EventsPage from './pages/EventsPage';
@@ -50,9 +49,7 @@ export default function App() {
           <Route
             element={
               <ProtectedRoute>
-                <DashboardProvider>
                   <DashboardLayout />
-                </DashboardProvider>
               </ProtectedRoute>
             }
           >

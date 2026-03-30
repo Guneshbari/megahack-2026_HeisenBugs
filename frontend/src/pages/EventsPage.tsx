@@ -6,12 +6,12 @@ import { useState } from 'react';
 import { Download, Pause, Play } from 'lucide-react';
 import EventTable from '../components/soc/EventTable';
 import EventDetailInspector from '../components/shared/EventDetailInspector';
-import { useDashboard } from '../context/DashboardContext';
+import { useDashboardStore } from '../store/dashboardStore';
 import { useUIStore } from '../store/uiStore';
 import type { TelemetryEvent } from '../types/telemetry';
 
 export default function EventsPage() {
-  const { filteredEvents } = useDashboard();
+  const filteredEvents = useDashboardStore((s) => s.filteredEvents);
   const selectedEvent    = useUIStore((s) => s.selectedEvent);
   const setSelectedEvent = useUIStore((s) => s.setSelectedEvent);
 
