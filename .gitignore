@@ -16,7 +16,7 @@ skills/
 # Project Specific
 checkpoint.json
 events_*.json
-collected_logs/
+collected_logs/   
 *.log
 
 # System
