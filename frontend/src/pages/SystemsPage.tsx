@@ -91,12 +91,13 @@ export default function SystemsPage() {
   const degradedCount = systems.filter((s) => s.status === 'degraded').length;
   const offlineCount  = systems.filter((s) => s.status === 'offline').length;
 
-  const ColHeader = ({ label, id }: { label: string; id: SortKey }) => (
+  const ColHeader = ({ label, id, align = 'left' }: { label: string; id: SortKey; align?: 'left' | 'right' }) => (
     <div
       onClick={() => toggleSort(id)}
-      className="font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none"
+      className={`font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}
     >
-      {label}{sortKey === id ? (sortDesc ? ' ↓' : ' ↑') : ''}
+      {label}
+      {sortKey === id && <span>{sortDesc ? '↓' : '↑'}</span>}
     </div>
   );
 
@@ -132,24 +133,24 @@ export default function SystemsPage() {
         <div className="flex-1 flex flex-col min-h-0 border border-[#1F2A37]">
           {/* Column headers */}
           <div
-            className="flex items-center px-4 gap-2 flex-shrink-0"
-            style={{ height: 24, background: '#111927', borderBottom: '1px solid #1F2A37' }}
+            className="flex items-center px-4 gap-4 flex-shrink-0"
+            style={{ height: 28, background: '#111927', borderBottom: '1px solid #1F2A37' }}
           >
-            <div className="w-6" style={{ position: 'sticky', left: 0 }} />
-            <div className="flex-1" style={{ position: 'sticky', left: 32 }}><ColHeader label="Hostname" id="hostname" /></div>
-            <div className="w-[100px]"><ColHeader label="Status" id="status" /></div>
-            <div className="w-[80px]"><ColHeader label="CPU" id="cpu" /></div>
-            <div className="w-[80px]"><ColHeader label="MEM" id="mem" /></div>
-            <div className="w-[60px]">
+            <div className="w-4 flex-shrink-0" style={{ position: 'sticky', left: 0 }} />
+            <div className="flex-1 min-w-[120px]" style={{ position: 'sticky', left: 24 }}><ColHeader label="Hostname" id="hostname" /></div>
+            <div className="w-[80px] flex-shrink-0"><ColHeader label="Status" id="status" /></div>
+            <div className="w-[100px] flex-shrink-0"><ColHeader label="CPU" id="cpu" /></div>
+            <div className="w-[100px] flex-shrink-0"><ColHeader label="MEM" id="mem" /></div>
+            <div className="w-[60px] flex-shrink-0 flex justify-end">
               <span className="font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">DISK</span>
             </div>
-            <div className="w-[80px]">
+            <div className="w-[100px] flex-shrink-0 flex justify-end">
               <span className="font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">IP</span>
             </div>
-            <div className="w-[52px]">
+            <div className="w-[60px] flex-shrink-0 flex justify-end">
               <span className="font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">Seen</span>
             </div>
-            <div className="w-[52px]"><ColHeader label="Events" id="events" /></div>
+            <div className="w-[60px] flex-shrink-0 flex justify-end"><ColHeader label="Events" id="events" align="right" /></div>
           </div>
 
           {/* Rows */}
@@ -164,75 +165,87 @@ export default function SystemsPage() {
                   onClick={() => setSelectedId(isSelected ? null : sys.system_id)}
                   onMouseEnter={() => setHighlighted(sys.system_id)}
                   onMouseLeave={() => setHighlighted(null)}
-                  className={`flex items-center px-4 gap-2 border-b border-[#1F2A37] cursor-pointer transition-colors even:bg-[#0F1720] ${isHighlighted && !isSelected ? 'bg-[#162131]' : ''}`}
+                  className={`flex items-center px-4 gap-4 border-b border-[#1F2A37] cursor-pointer transition-colors even:bg-[#0F1720] ${isHighlighted && !isSelected ? 'bg-[#162131]' : ''}`}
                   style={{
-                    height: 30,
+                    height: 36,
                     background: isSelected ? '#1E293B' : undefined,
                     borderLeft: `3px solid ${STATUS_COLOR[sys.status]}`,
                   }}
                 >
                   {/* Status dot */}
-                  <span className={`${STATUS_DOT[sys.status]}`} style={{ position: 'sticky', left: 0 }} />
+                  <div className="w-4 flex-shrink-0 flex items-center justify-center" style={{ position: 'sticky', left: 0 }}>
+                    <span className={`${STATUS_DOT[sys.status]}`} />
+                  </div>
 
                   {/* Hostname */}
-                  <span className="font-mono text-[11px] text-[#E6EDF3] flex-1 truncate font-medium" style={{ position: 'sticky', left: 32 }}>
-                    {sys.hostname.split('.')[0]}
+                  <div className="flex-1 min-w-[120px] truncate" style={{ position: 'sticky', left: 24 }}>
+                    <span className="font-mono text-[11px] text-[#E6EDF3] font-medium">
+                      {sys.hostname.split('.')[0]}
+                    </span>
                     <span className="text-[#6B7C93] text-[10px] ml-1">
                       .{sys.hostname.split('.').slice(1).join('.')}
                     </span>
-                  </span>
+                  </div>
 
                   {/* Status text */}
-                  <span
-                    className="font-mono text-[10px] w-[100px] flex-shrink-0"
+                  <div
+                    className="font-mono text-[10px] w-[80px] flex-shrink-0"
                     style={{ color: STATUS_COLOR[sys.status] }}
                   >
                     {sys.status.toUpperCase()}
-                  </span>
+                  </div>
 
                   {/* CPU */}
-                  <div className="w-[80px] flex items-center gap-2 flex-shrink-0">
-                    <MiniBar value={sys.cpu_usage_percent} color={CPU_COLOR} />
+                  <div className="w-[100px] flex items-center justify-between gap-2 flex-shrink-0">
+                    <div className="flex-1">
+                      <MiniBar value={sys.cpu_usage_percent} color={CPU_COLOR} />
+                    </div>
                     <span
-                      className="font-mono text-[10px] text-[#E6EDF3]"
-                      style={{ minWidth: 28, textAlign: 'right' }}
+                      className="font-mono text-[10px] text-[#E6EDF3] w-[32px] text-right inline-block"
                     >
                       {sys.cpu_usage_percent.toFixed(0)}%
                     </span>
                   </div>
 
                   {/* MEM */}
-                  <div className="w-[80px] flex items-center gap-2 flex-shrink-0">
-                    <MiniBar value={sys.memory_usage_percent} color={MEM_COLOR} />
+                  <div className="w-[100px] flex items-center justify-between gap-2 flex-shrink-0">
+                    <div className="flex-1">
+                      <MiniBar value={sys.memory_usage_percent} color={MEM_COLOR} />
+                    </div>
                     <span
-                      className="font-mono text-[10px] text-[#E6EDF3]"
-                      style={{ minWidth: 28, textAlign: 'right' }}
+                      className="font-mono text-[10px] text-[#E6EDF3] w-[32px] text-right inline-block"
                     >
                       {sys.memory_usage_percent.toFixed(0)}%
                     </span>
                   </div>
 
                   {/* Disk (free%) */}
-                  <div className="w-[60px] flex items-center gap-1 flex-shrink-0 text-[#E6EDF3]">
-                    <span className="font-mono text-[10px]">
+                  <div className="w-[60px] flex items-center justify-end flex-shrink-0">
+                    <span className="font-mono text-[10px] text-[#E6EDF3]">
                       {sys.disk_free_percent.toFixed(0)}%
                     </span>
                   </div>
 
                   {/* IP */}
-                  <span className="font-mono text-[10px] text-[#6B7C93] w-[80px] flex-shrink-0">
-                    {sys.ip_address}
-                  </span>
+                  <div className="w-[100px] flex items-center justify-end flex-shrink-0">
+                    <span className="font-mono text-[10px] text-[#6B7C93]">
+                      {sys.ip_address}
+                    </span>
+                  </div>
 
                   {/* Last seen */}
-                  <span className="font-mono text-[10px] text-[#6B7C93] w-[52px] text-right flex-shrink-0">
-                    {timeAgo(sys.last_seen)}
-                  </span>
+                  <div className="w-[60px] flex items-center justify-end flex-shrink-0">
+                    <span className="font-mono text-[10px] text-[#6B7C93]">
+                      {timeAgo(sys.last_seen)}
+                    </span>
+                  </div>
 
                   {/* Events */}
-                  <span className="font-mono text-[10px] text-[#9FB3C8] w-[52px] text-right flex-shrink-0">
-                    {sys.total_events.toLocaleString()}
-                  </span>
+                  <div className="w-[60px] flex items-center justify-end flex-shrink-0">
+                    <span className="font-mono text-[10px] text-[#9FB3C8]">
+                      {sys.total_events.toLocaleString()}
+                    </span>
+                  </div>
                 </div>
               );
             })}

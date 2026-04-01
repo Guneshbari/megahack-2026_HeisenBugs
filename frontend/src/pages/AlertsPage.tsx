@@ -105,10 +105,10 @@ export default function AlertsPage() {
     }
   };
 
-  const ColHeader = ({ label, id }: { label: string; id: SortKey }) => (
+  const ColHeader = ({ label, id, align = 'left' }: { label: string; id: SortKey; align?: 'left' | 'right' }) => (
     <div
       onClick={() => toggleSort(id)}
-      className="font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1"
+      className={`font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}
       style={{ userSelect: 'none' }}
     >
       {label}
@@ -217,12 +217,12 @@ export default function AlertsPage() {
       <div
         className="border border-[#1F2A37] flex-shrink-0 bg-[#111927]"
       >
-        <div className="flex items-center px-2 gap-3" style={{ height: 24 }}>
+        <div className="flex items-center px-4 gap-4" style={{ height: 28 }}>
           <div className="w-[68px]" style={{ position: 'sticky', left: 0 }}><ColHeader label="SEV" id="severity" /></div>
-          <div className="w-[140px]" style={{ position: 'sticky', left: 76 }}><ColHeader label="System" id="system" /></div>
+          <div className="w-[140px]" style={{ position: 'sticky', left: 84 }}><ColHeader label="System" id="system" /></div>
           <div className="flex-1 font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">Title</div>
-          <div className="w-[52px]"><ColHeader label="Age" id="age" /></div>
-          <div className="w-[100px]" />
+          <div className="w-[60px] flex justify-end"><ColHeader label="Age" id="age" align="right" /></div>
+          <div className="w-[124px]" />
         </div>
       </div>
 
@@ -241,17 +241,17 @@ export default function AlertsPage() {
               <div key={alert.alert_id}>
                 <div
                   onClick={() => setSelectedId(isSelected ? null : alert.alert_id)}
-                  className={`flex items-center gap-3 px-2 border-b border-[#1F2A37] border-l-[3px] cursor-pointer transition-colors ${
+                  className={`flex items-center gap-4 px-4 border-b border-[#1F2A37] border-l-[3px] cursor-pointer transition-colors ${
                     isSelected ? 'bg-[#1E293B]' :
                     alert.severity === 'CRITICAL' ? 'bg-[#2A0F10]' :
                     alert.severity === 'ERROR' ? 'bg-[#2A1A0F]' :
                     'hover:bg-[#162131] even:bg-[#0F1720]'
                   }`}
-                  style={{ height: 30, borderLeftColor: sevColor }}
+                  style={{ height: 36, borderLeftColor: sevColor }}
                 >
                   {/* Severity badge */}
                   <span
-                    className={`soc-badge soc-badge-${alert.severity.toLowerCase()} w-[68px] justify-center`}
+                    className={`soc-badge soc-badge-${alert.severity.toLowerCase()} w-[68px] justify-center flex-shrink-0`}
                     style={{ position: 'sticky', left: 0 }}
                   >
                     {alert.severity}
@@ -260,7 +260,7 @@ export default function AlertsPage() {
                   {/* System (Pinned next to severity) */}
                   <span 
                     className="font-mono text-[11px] text-[#9FB3C8] w-[140px] truncate flex-shrink-0"
-                    style={{ position: 'sticky', left: 76 }}
+                    style={{ position: 'sticky', left: 84 }}
                   >
                     {alert.hostname.split('.')[0]}
                   </span>
@@ -271,34 +271,38 @@ export default function AlertsPage() {
                   </span>
 
                   {/* Age */}
-                  <span className="font-mono text-[10px] text-[#6B7C93] w-[52px] text-right flex-shrink-0">
-                    {timeAgo(alert.triggered_at)}
-                  </span>
+                  <div className="w-[60px] flex justify-end flex-shrink-0">
+                    <span className="font-mono text-[10px] text-[#6B7C93] text-right">
+                      {timeAgo(alert.triggered_at)}
+                    </span>
+                  </div>
 
                   {/* Actions */}
-                  <div className="flex items-center gap-1 flex-shrink-0 w-[100px] justify-end">
+                  <div className="flex items-center justify-end gap-2 flex-shrink-0 w-[124px]">
                     {!alert.acknowledged && (
                       <button
                         onClick={(e) => handleAction('acknowledge', alert, e)}
-                        className="soc-btn h-[20px] px-2 text-[9px]"
+                        className="soc-btn h-[24px] px-2 text-[10px] flex items-center justify-center gap-1.5 flex-1 w-[58px]"
                         style={{ color: '#00C853', borderColor: '#00C853' }}
                       >
-                        <Check className="w-2.5 h-2.5" />
+                        <Check className="w-3 h-3" />
                         ACK
                       </button>
                     )}
                     {!alert.escalated && (
                       <button
                         onClick={(e) => handleAction('escalate', alert, e)}
-                        className="soc-btn h-[20px] px-2 text-[9px]"
+                        className="soc-btn h-[24px] px-2 text-[10px] flex items-center justify-center gap-1.5 flex-1 w-[58px]"
                         style={{ color: '#FF8A00', borderColor: '#FF8A00' }}
                       >
-                        <ArrowUpRight className="w-2.5 h-2.5" />
+                        <ArrowUpRight className="w-3 h-3" />
                         ESC
                       </button>
                     )}
                     {alert.escalated && (
-                      <span className="font-mono text-[9px] text-[#FF8A00]">↑ ESC</span>
+                      <span className="font-mono text-[10px] text-[#FF8A00] flex-1 text-right flex items-center justify-end gap-1">
+                        <ArrowUpRight className="w-3 h-3" /> ESC
+                      </span>
                     )}
                   </div>
                 </div>
