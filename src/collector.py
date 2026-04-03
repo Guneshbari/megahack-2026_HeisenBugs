@@ -500,7 +500,7 @@ def get_resource_snapshot() -> Dict:
     """Single resource snapshot — call once per cycle, not per event.
 
     OS-aware disk path:
-      - Windows: queries C:\ (the system drive, where Task Manager reports usage)
+      - Windows: queries C:\\ (the system drive, where Task Manager reports usage)
       - Linux/macOS: queries / (root)
     CPU interval=1.0 matches the Windows Task Manager 1-second averaging window.
     Using interval=0.1 produces unreliable spike readings.

@@ -21,6 +21,7 @@ const STATUS_COLOR: Record<SystemStatus, string> = {
   degraded: '#FFD600',
   offline:  '#6B7C93',
 };
+const STATUS_ORDER: Record<SystemStatus, number> = { offline: 0, degraded: 1, online: 2 };
 
 function MiniBar({ value, color }: { value: number; color: string }) {
   return (
@@ -49,6 +50,32 @@ function timeAgo(ts: string): string {
 
 type SortKey = 'hostname' | 'status' | 'cpu' | 'mem' | 'events';
 
+function ColumnHeader({
+  align = 'left',
+  id,
+  isActive,
+  isDescending,
+  label,
+  onToggle,
+}: {
+  align?: 'left' | 'right';
+  id: SortKey;
+  isActive: boolean;
+  isDescending: boolean;
+  label: string;
+  onToggle: (key: SortKey) => void;
+}) {
+  return (
+    <div
+      onClick={() => onToggle(id)}
+      className={`font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}
+    >
+      {label}
+      {isActive && <span>{isDescending ? 'v' : '^'}</span>}
+    </div>
+  );
+}
+
 export default function SystemsPage() {
   const systems = useDashboardStore((s) => s.systems);
   const setHighlighted = useUIStore((s) => s.setHighlightedSystem);
@@ -64,8 +91,6 @@ export default function SystemsPage() {
     else { setSortKey(key); setSortDesc(true); }
   };
 
-  const statusOrder: Record<SystemStatus, number> = { offline: 0, degraded: 1, online: 2 };
-
   const displayed = useMemo(() => {
     const base = statusFilter === 'all'
       ? systems
@@ -74,7 +99,7 @@ export default function SystemsPage() {
     return [...base].sort((a, b) => {
       let cmp = 0;
       if (sortKey === 'hostname') cmp = a.hostname.localeCompare(b.hostname);
-      if (sortKey === 'status')   cmp = statusOrder[a.status] - statusOrder[b.status];
+      if (sortKey === 'status')   cmp = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
       if (sortKey === 'cpu')      cmp = a.cpu_usage_percent - b.cpu_usage_percent;
       if (sortKey === 'mem')      cmp = a.memory_usage_percent - b.memory_usage_percent;
       if (sortKey === 'events')   cmp = a.total_events - b.total_events;
@@ -90,16 +115,6 @@ export default function SystemsPage() {
   const onlineCount   = systems.filter((s) => s.status === 'online').length;
   const degradedCount = systems.filter((s) => s.status === 'degraded').length;
   const offlineCount  = systems.filter((s) => s.status === 'offline').length;
-
-  const ColHeader = ({ label, id, align = 'left' }: { label: string; id: SortKey; align?: 'left' | 'right' }) => (
-    <div
-      onClick={() => toggleSort(id)}
-      className={`font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}
-    >
-      {label}
-      {sortKey === id && <span>{sortDesc ? '↓' : '↑'}</span>}
-    </div>
-  );
 
   return (
     <div className="flex flex-col h-full gap-1" style={{ minHeight: 0 }}>
@@ -137,10 +152,10 @@ export default function SystemsPage() {
             style={{ height: 28, background: '#111927', borderBottom: '1px solid #1F2A37' }}
           >
             <div className="w-4 flex-shrink-0" style={{ position: 'sticky', left: 0 }} />
-            <div className="flex-1 min-w-[120px]" style={{ position: 'sticky', left: 24 }}><ColHeader label="Hostname" id="hostname" /></div>
-            <div className="w-[80px] flex-shrink-0"><ColHeader label="Status" id="status" /></div>
-            <div className="w-[100px] flex-shrink-0"><ColHeader label="CPU" id="cpu" /></div>
-            <div className="w-[100px] flex-shrink-0"><ColHeader label="MEM" id="mem" /></div>
+            <div className="flex-1 min-w-[120px]" style={{ position: 'sticky', left: 24 }}><ColumnHeader label="Hostname" id="hostname" isActive={sortKey === 'hostname'} isDescending={sortDesc} onToggle={toggleSort} /></div>
+            <div className="w-[80px] flex-shrink-0"><ColumnHeader label="Status" id="status" isActive={sortKey === 'status'} isDescending={sortDesc} onToggle={toggleSort} /></div>
+            <div className="w-[100px] flex-shrink-0"><ColumnHeader label="CPU" id="cpu" isActive={sortKey === 'cpu'} isDescending={sortDesc} onToggle={toggleSort} /></div>
+            <div className="w-[100px] flex-shrink-0"><ColumnHeader label="MEM" id="mem" isActive={sortKey === 'mem'} isDescending={sortDesc} onToggle={toggleSort} /></div>
             <div className="w-[60px] flex-shrink-0 flex justify-end">
               <span className="font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">DISK</span>
             </div>
@@ -150,7 +165,7 @@ export default function SystemsPage() {
             <div className="w-[60px] flex-shrink-0 flex justify-end">
               <span className="font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">Seen</span>
             </div>
-            <div className="w-[60px] flex-shrink-0 flex justify-end"><ColHeader label="Events" id="events" align="right" /></div>
+            <div className="w-[60px] flex-shrink-0 flex justify-end"><ColumnHeader label="Events" id="events" align="right" isActive={sortKey === 'events'} isDescending={sortDesc} onToggle={toggleSort} /></div>
           </div>
 
           {/* Rows */}
@@ -319,3 +334,4 @@ export default function SystemsPage() {
     </div>
   );
 }
+

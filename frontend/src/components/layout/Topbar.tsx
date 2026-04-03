@@ -7,6 +7,7 @@ import {
   getTotalEventCount,
 } from '../../data/mockData';
 import { fetchPipelineHealth, fetchRecentAlerts } from '../../lib/api';
+import type { Alert } from '../../types/telemetry';
 import { TIME_RANGE_LABELS, REFRESH_LABELS, type TimeRange, type AutoRefresh } from '../../lib/dashboardDerived';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { useAuth } from '../../context/AuthContext';
@@ -37,7 +38,7 @@ export default function Topbar() {
   const refreshRef = useRef<HTMLDivElement>(null);
   const userRef = useRef<HTMLDivElement>(null);
   const notificationRef = useRef<HTMLDivElement>(null);
-  const [recentAlerts, setRecentAlerts] = useState<any[]>([]);
+  const [recentAlerts, setRecentAlerts] = useState<Alert[]>([]);
 
   useEffect(() => {
     const fetchHealthAndAlerts = async () => {
@@ -47,14 +48,16 @@ export default function Topbar() {
           status: data.lag_status || 'OK',
           delay_seconds: data.kafka_lag || 0,
         });
-      } catch (e) {
+      } catch {
         setPipelineStatus({ status: 'DOWN', delay_seconds: 999 });
       }
 
       try {
         const fetchAlertData = await fetchRecentAlerts();
         setRecentAlerts(fetchAlertData);
-      } catch(e) {}
+      } catch {
+        setRecentAlerts([]);
+      }
     };
     fetchHealthAndAlerts();
     const interval = setInterval(fetchHealthAndAlerts, 10000);

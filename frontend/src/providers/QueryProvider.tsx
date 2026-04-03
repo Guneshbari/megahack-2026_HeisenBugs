@@ -22,8 +22,6 @@ const queryClient = new QueryClient({
   },
 });
 
-export { queryClient };
-
 interface QueryProviderProps {
   readonly children: ReactNode;
 }

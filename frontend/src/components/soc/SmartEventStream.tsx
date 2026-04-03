@@ -8,7 +8,7 @@
  *  - Click selects incident via uiStore
  *  - No animations longer than 150ms
  */
-import { useMemo, useCallback, useState, memo } from 'react';
+import { useMemo, useCallback, useState, memo, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useSignalStore } from '../../store/signalStore';
 import { useUIStore } from '../../store/uiStore';
@@ -36,12 +36,17 @@ const ROW_PADDING_Y = 10;
 const SIGNAL_FONT = '11px JetBrains Mono';
 const SIGNAL_LINE_HEIGHT = 16;
 
-const SignalRow = memo(({ signal, isSelected, onClick }: {
-  signal: GroupedSignal;
-  isSelected: boolean;
+function isSignalRecent(lastSeen: string, now: number): boolean {
+  return now - new Date(lastSeen).getTime() < 60_000;
+}
+
+const SignalRow = memo(({ now, onClick, isSelected, signal }: {
+  now: number;
   onClick: () => void;
+  isSelected: boolean;
+  signal: GroupedSignal;
 }) => {
-  const isRecent = Date.now() - new Date(signal.lastSeen).getTime() < 60000;
+  const isRecent = isSignalRecent(signal.lastSeen, now);
 
   return (
     <div
@@ -74,6 +79,7 @@ export default function SmartEventStream() {
   const selectedIncidentId = useUIStore((s) => s.selectedIncidentId);
   const setSelectedIncidentId = useUIStore((s) => s.setSelectedIncidentId);
   const [showNoise, setShowNoise] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const signals = useMemo(
     () => (showNoise ? allSignals : allSignals.filter((s) => s.isSpike || s.severity === 'CRITICAL')),
@@ -105,6 +111,10 @@ export default function SmartEventStream() {
   const handleClick = useCallback((id: string) => {
     setSelectedIncidentId(selectedIncidentId === id ? null : id);
   }, [selectedIncidentId, setSelectedIncidentId]);
+
+  useEffect(() => {
+    setNow(Date.now());
+  }, [signals]);
 
   const stats = useMemo(() => {
     const spikes = allSignals.filter((s) => s.isSpike).length;
@@ -170,6 +180,7 @@ export default function SmartEventStream() {
                     signal={signal}
                     isSelected={selectedIncidentId === signal.id}
                     onClick={() => handleClick(signal.id)}
+                    now={now}
                   />
                 </div>
               );

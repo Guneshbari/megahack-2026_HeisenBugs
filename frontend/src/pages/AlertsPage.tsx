@@ -16,6 +16,7 @@ const SEV_COLORS: Record<Severity, string> = {
   WARNING:  '#FFD600',
   INFO:     '#3BA4FF',
 };
+const SEV_ORDER: Record<Severity, number> = { CRITICAL: 4, ERROR: 3, WARNING: 2, INFO: 1 };
 
 function timeAgo(ts: string): string {
   const diff = Date.now() - new Date(ts).getTime();
@@ -32,6 +33,33 @@ type SortKey = 'severity' | 'age' | 'system';
 const ALERT_ROW_MIN_HEIGHT = 36;
 const ALERT_TITLE_FONT = '11px Inter';
 const ALERT_TITLE_LINE_HEIGHT = 16;
+
+function ColumnHeader({
+  align = 'left',
+  id,
+  isActive,
+  isDescending,
+  label,
+  onToggle,
+}: {
+  align?: 'left' | 'right';
+  id: SortKey;
+  isActive: boolean;
+  isDescending: boolean;
+  label: string;
+  onToggle: (key: SortKey) => void;
+}) {
+  return (
+    <div
+      onClick={() => onToggle(id)}
+      className={`font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}
+      style={{ userSelect: 'none' }}
+    >
+      {label}
+      {isActive && <span>{isDescending ? 'v' : '^'}</span>}
+    </div>
+  );
+}
 
 export default function AlertsPage() {
   const filteredAlerts = useDashboardStore((s) => s.filteredAlerts);
@@ -63,8 +91,6 @@ export default function AlertsPage() {
     [filteredAlerts, localStates],
   );
 
-  const sevOrder: Record<Severity, number> = { CRITICAL: 4, ERROR: 3, WARNING: 2, INFO: 1 };
-
   const displayed = useMemo(() => {
     const base = tab === 'active'
       ? mergedAlerts.filter((a) => !a.acknowledged)
@@ -72,7 +98,7 @@ export default function AlertsPage() {
 
     return [...base].sort((a, b) => {
       let cmp = 0;
-      if (sortKey === 'severity') cmp = sevOrder[a.severity] - sevOrder[b.severity];
+      if (sortKey === 'severity') cmp = SEV_ORDER[a.severity] - SEV_ORDER[b.severity];
       if (sortKey === 'age')      cmp = new Date(a.triggered_at).getTime() - new Date(b.triggered_at).getTime();
       if (sortKey === 'system')   cmp = a.hostname.localeCompare(b.hostname);
       return sortDesc ? -cmp : cmp;
@@ -146,17 +172,6 @@ export default function AlertsPage() {
       showToast('Failed to create rule', false);
     }
   };
-
-  const ColHeader = ({ label, id, align = 'left' }: { label: string; id: SortKey; align?: 'left' | 'right' }) => (
-    <div
-      onClick={() => toggleSort(id)}
-      className={`font-mono text-[9px] text-[#334155] uppercase tracking-wider cursor-pointer select-none flex items-center gap-1 ${align === 'right' ? 'justify-end' : ''}`}
-      style={{ userSelect: 'none' }}
-    >
-      {label}
-      {sortKey === id && <span>{sortDesc ? '↓' : '↑'}</span>}
-    </div>
-  );
 
   const activeCount = mergedAlerts.filter((a) => !a.acknowledged).length;
   const ackCount    = mergedAlerts.filter((a) => a.acknowledged).length;
@@ -262,10 +277,10 @@ export default function AlertsPage() {
         className="border border-[#1F2A37] flex-shrink-0 bg-[#111927]"
       >
         <div className="flex items-center px-4 gap-4" style={{ height: 28 }}>
-          <div className="w-[68px]" style={{ position: 'sticky', left: 0 }}><ColHeader label="SEV" id="severity" /></div>
-          <div className="w-[140px]" style={{ position: 'sticky', left: 84 }}><ColHeader label="System" id="system" /></div>
+          <div className="w-[68px]" style={{ position: 'sticky', left: 0 }}><ColumnHeader label="SEV" id="severity" isActive={sortKey === 'severity'} isDescending={sortDesc} onToggle={toggleSort} /></div>
+          <div className="w-[140px]" style={{ position: 'sticky', left: 84 }}><ColumnHeader label="System" id="system" isActive={sortKey === 'system'} isDescending={sortDesc} onToggle={toggleSort} /></div>
           <div className="flex-1 font-mono text-[9px] text-[#6B7C93] uppercase tracking-wider">Title</div>
-          <div className="w-[60px] flex justify-end"><ColHeader label="Age" id="age" align="right" /></div>
+          <div className="w-[60px] flex justify-end"><ColumnHeader label="Age" id="age" align="right" isActive={sortKey === 'age'} isDescending={sortDesc} onToggle={toggleSort} /></div>
           <div className="w-[124px]" />
         </div>
       </div>
@@ -401,3 +416,4 @@ export default function AlertsPage() {
     </div>
   );
 }
+

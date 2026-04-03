@@ -170,7 +170,8 @@ const MOCK_ALERTS: Alert[] = [
   }
 ];
 
-export async function fetchEvents(_limitOrOptions?: unknown): Promise<TelemetryEvent[]> {
+export async function fetchEvents(limitOrOptions?: unknown): Promise<TelemetryEvent[]> {
+  void limitOrOptions;
   return Promise.resolve(MOCK_EVENTS);
 }
 
@@ -186,7 +187,10 @@ export async function fetchRecentAlerts(): Promise<Alert[]> {
   return Promise.resolve(MOCK_ALERTS);
 }
 
-export async function fetchMetrics(_startTime?: string, _endTime?: string, _windowMinutes?: number): Promise<MetricPoint[]> {
+export async function fetchMetrics(startTime?: string, endTime?: string, windowMinutes?: number): Promise<MetricPoint[]> {
+  void startTime;
+  void endTime;
+  void windowMinutes;
   const points: MetricPoint[] = [];
   const now = Date.now();
   for (let i = 24; i >= 0; i--) {
@@ -211,7 +215,8 @@ export interface DashboardMetrics {
   warning_events: number;
 }
 
-export async function fetchDashboardMetrics(_windowMinutes?: number): Promise<DashboardMetrics> {
+export async function fetchDashboardMetrics(windowMinutes?: number): Promise<DashboardMetrics> {
+  void windowMinutes;
   return Promise.resolve({
     total_events: MOCK_EVENTS.length,
     critical_events: MOCK_EVENTS.filter(e => e.severity === 'CRITICAL').length,
@@ -219,7 +224,8 @@ export async function fetchDashboardMetrics(_windowMinutes?: number): Promise<Da
   });
 }
 
-export async function fetchFaultDistribution(_windowMinutes?: number): Promise<FaultTypeCount[]> {
+export async function fetchFaultDistribution(windowMinutes?: number): Promise<FaultTypeCount[]> {
+  void windowMinutes;
   return Promise.resolve([
     { fault_type: 'Auth Failure', count: 45 },
     { fault_type: 'High CPU', count: 32 },
@@ -229,7 +235,8 @@ export async function fetchFaultDistribution(_windowMinutes?: number): Promise<F
   ]);
 }
 
-export async function fetchSeverityDistribution(_windowMinutes?: number): Promise<SeverityCount[]> {
+export async function fetchSeverityDistribution(windowMinutes?: number): Promise<SeverityCount[]> {
+  void windowMinutes;
   return Promise.resolve([
     { severity: 'INFO', count: 85 },
     { severity: 'WARNING', count: 42 },
@@ -238,7 +245,9 @@ export async function fetchSeverityDistribution(_windowMinutes?: number): Promis
   ]);
 }
 
-export async function fetchSystemFailures(_limit = 6, _windowMinutes?: number): Promise<SystemFailureCount[]> {
+export async function fetchSystemFailures(limit = 6, windowMinutes?: number): Promise<SystemFailureCount[]> {
+  void limit;
+  void windowMinutes;
   return Promise.resolve([
     { hostname: 'app-prod-01.internal', system_id: 'app-prod-01', failure_count: 55 },
     { hostname: 'db-prod-01.internal', system_id: 'db-prod-01', failure_count: 23 },
@@ -247,7 +256,7 @@ export async function fetchSystemFailures(_limit = 6, _windowMinutes?: number): 
   ]);
 }
 
-export async function fetchSystemMetrics(): Promise<any> {
+export async function fetchSystemMetrics(): Promise<{ avg_cpu: number; avg_memory: number; avg_disk: number }> {
   return Promise.resolve({
     avg_cpu: 45.2,
     avg_memory: 62.5,

@@ -11,6 +11,7 @@ import { useMemo } from 'react';
 import type { EChartsOption } from 'echarts';
 import { EChart } from '../components/soc/EChart';
 import { useDashboardStore } from '../store/dashboardStore';
+import type { FaultTypeCount, MetricPoint, SeverityCount } from '../types/telemetry';
 
 const DARK   = '#0B1220';
 const PANEL  = '#0F172A';
@@ -39,7 +40,7 @@ const TOOLTIP_STYLE = {
 const AXIS_LABEL = { color: DIM, fontSize: 9, fontFamily: 'JetBrains Mono,monospace' };
 const SPLIT_LINE = { lineStyle: { color: '#151f2e', type: 'dashed' as const } };
 
-function buildFreqOption(metrics: any[]): EChartsOption {
+function buildFreqOption(metrics: MetricPoint[]): EChartsOption {
   const isSparse = metrics.length <= 2;
   return {
     backgroundColor: DARK,
@@ -71,7 +72,7 @@ function buildFreqOption(metrics: any[]): EChartsOption {
   };
 }
 
-function buildSevOption(severities: any[]): EChartsOption {
+function buildSevOption(severities: SeverityCount[]): EChartsOption {
   const total = severities.reduce((s, x) => s + x.count, 0) || 1;
   return {
     backgroundColor: DARK,
@@ -102,7 +103,7 @@ function buildSevOption(severities: any[]): EChartsOption {
   };
 }
 
-function buildFaultOption(faults: any[]): EChartsOption {
+function buildFaultOption(faults: FaultTypeCount[]): EChartsOption {
   const sorted = [...faults].sort((a, b) => b.count - a.count).slice(0, 8);
   return {
     backgroundColor: DARK,
@@ -131,7 +132,7 @@ function buildFaultOption(faults: any[]): EChartsOption {
   };
 }
 
-function buildResourceOption(metrics: any[]): EChartsOption {
+function buildResourceOption(metrics: MetricPoint[]): EChartsOption {
   const isSparse = metrics.length <= 2;
   return {
     backgroundColor: DARK,
@@ -164,17 +165,8 @@ function buildResourceOption(metrics: any[]): EChartsOption {
   };
 }
 
-export default function AnalyticsPage() {
-  const metrics = useDashboardStore((s) => s.metrics);
-  const severityDistribution = useDashboardStore((s) => s.severityDistribution);
-  const faultDistribution = useDashboardStore((s) => s.faultDistribution);
-
-  const freqOption     = useMemo(() => buildFreqOption(metrics),              [metrics]);
-  const sevOption      = useMemo(() => buildSevOption(severityDistribution),  [severityDistribution]);
-  const faultOption    = useMemo(() => buildFaultOption(faultDistribution),   [faultDistribution]);
-  const resourceOption = useMemo(() => buildResourceOption(metrics),          [metrics]);
-
-  const ChartPanel = ({ title, children }: { title: string; children: React.ReactNode }) => (
+function ChartPanel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
     <div className="soc-panel flex flex-col overflow-hidden" style={{ minHeight: 0 }}>
       <div className="soc-panel-header">
         <span className="soc-panel-title">{title}</span>
@@ -184,6 +176,17 @@ export default function AnalyticsPage() {
       </div>
     </div>
   );
+}
+
+export default function AnalyticsPage() {
+  const metrics = useDashboardStore((s) => s.metrics);
+  const severityDistribution = useDashboardStore((s) => s.severityDistribution);
+  const faultDistribution = useDashboardStore((s) => s.faultDistribution);
+
+  const freqOption     = useMemo(() => buildFreqOption(metrics),              [metrics]);
+  const sevOption      = useMemo(() => buildSevOption(severityDistribution),  [severityDistribution]);
+  const faultOption    = useMemo(() => buildFaultOption(faultDistribution),   [faultDistribution]);
+  const resourceOption = useMemo(() => buildResourceOption(metrics),          [metrics]);
 
   return (
     <div className="flex flex-col h-full gap-1" style={{ minHeight: 0 }}>

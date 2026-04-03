@@ -492,7 +492,9 @@ def extract_event_description(raw_xml: str) -> Optional[str]:
             return msg.text.strip()
 
         # Fallback: first 3 EventData values
-        event_data = root.find('.//e:EventData', ns) or root.find('.//EventData')
+        event_data = root.find('.//e:EventData', ns)
+        if event_data is None:
+            event_data = root.find('.//EventData')
         parts: List[str] = []
         if event_data is not None:
             children: List[ET.Element] = list(event_data)

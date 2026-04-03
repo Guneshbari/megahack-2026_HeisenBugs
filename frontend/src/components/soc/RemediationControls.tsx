@@ -75,11 +75,13 @@ export default function RemediationControls({ incident }: { incident: Incident }
   }, []);
 
   // ── Handlers ──────────────────────────────────────────────────────
+  const primarySystemId = incident.systems[0] ?? '';
+
   const handleConfirm = useCallback(async (hookId: string) => {
     setHookStatus(hookId, { status: 'running' });
 
     const result = await executeRemediation(
-      incident.systems[0] ?? '',
+      primarySystemId,
       hookId,
       cooldownMapRef.current,
       inFlightSetRef.current,
@@ -92,7 +94,7 @@ export default function RemediationControls({ incident }: { incident: Incident }
       result,
       cooldown: lastRun ? COOLDOWN_S : 0,
     });
-  }, [incident.incident_id, recordRemediation, setHookStatus]);
+  }, [incident.incident_id, primarySystemId, recordRemediation, setHookStatus]);
 
   const handleCancel = useCallback((hookId: string) => {
     setHookStatus(hookId, { status: 'idle' });
