@@ -72,6 +72,9 @@ from shared.db_constants import (
 from shared.collector_constants import (
     COLLECTOR_SECRET,
 )
+from shared.ml_constants import (
+    ML_PIPELINE_INTERVAL_SECS,
+)
 from sentinel_utils import (
     CircuitBreaker,
     clean_message,
@@ -747,14 +750,25 @@ def setup_database(conn: Any) -> None:
                 system_id VARCHAR(100) NOT NULL,
                 prediction_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 anomaly_score NUMERIC(4,3) DEFAULT 0.0,
+                is_anomaly BOOLEAN DEFAULT NULL,
                 failure_probability NUMERIC(4,3) DEFAULT 0.0,
                 predicted_fault VARCHAR(100) DEFAULT 'NONE',
+                cluster_id INTEGER DEFAULT NULL,
                 model_version VARCHAR(50) DEFAULT 'v1'
             );
             CREATE INDEX IF NOT EXISTS idx_ml_predictions_system_time
                 ON ml_predictions(system_id, prediction_time DESC);
             """
         )
+
+        # Idempotent migration — add new columns if running against an existing DB
+        for ml_col, ml_typedef in [
+            ("is_anomaly", "BOOLEAN DEFAULT NULL"),
+            ("cluster_id", "INTEGER DEFAULT NULL"),
+        ]:
+            cur.execute(
+                f"ALTER TABLE ml_predictions ADD COLUMN IF NOT EXISTS {ml_col} {ml_typedef};"
+            )
 
         cur.execute(
             """
@@ -1268,6 +1282,125 @@ def log_kafka_lag(consumer: KafkaConsumer) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# ML pipeline background thread
+# ---------------------------------------------------------------------------
+
+import threading as _threading
+
+
+def _ml_pipeline_worker(stop_event: "_threading.Event") -> None:
+    """
+    Background daemon thread: runs feature_builder → ml_engine every
+    ML_PIPELINE_INTERVAL_SECS seconds.  Completely non-blocking for the
+    Kafka consumer loop — all DB I/O happens on its own connection.
+
+    The thread is launched as a daemon so it exits automatically when the
+    main process terminates.
+    """
+    # Deferred imports keep the module lightweight during testing
+    try:
+        import feature_builder as _fb
+        import ml_engine as _ml
+    except ImportError as _ie:
+        logger.error("[ml_pipeline] Cannot import pipeline modules: %s — ML disabled.", _ie)
+        return
+
+    logger.info(
+        "[ml_pipeline] Background worker started (interval=%ds).",
+        ML_PIPELINE_INTERVAL_SECS,
+    )
+
+    # Stagger the first run by half the interval so the consumer has time to
+    # ingest an initial batch before ML tries to score anything.
+    stop_event.wait(ML_PIPELINE_INTERVAL_SECS // 2)
+
+    ml_conn: Any = None
+    ml_reconnect_delay = 5.0
+
+    while not stop_event.is_set():
+        cycle_start = time.time()
+        try:
+            # Ensure we have a healthy DB connection
+            if ml_conn is None:
+                ml_conn_result, ok = retry_with_backoff(
+                    make_db_connection, label="ml_pipeline_db_connect"
+                )
+                if ok and ml_conn_result:
+                    ml_conn = ml_conn_result
+                    ml_reconnect_delay = 5.0
+                else:
+                    logger.error(
+                        "[ml_pipeline] DB connect failed — retrying in %.0fs.",
+                        ml_reconnect_delay,
+                    )
+                    stop_event.wait(ml_reconnect_delay)
+                    ml_reconnect_delay = min(ml_reconnect_delay * 2, 60.0)
+                    continue
+
+            # ── feature_builder cycle ────────────────────────────────────
+            try:
+                _, systems_checked, snaps_written = _fb.run_cycle(ml_conn, cycle=0)
+                structured_log(
+                    "ml_pipeline",
+                    {
+                        "operation": "feature_builder_cycle",
+                        "status": "ok",
+                        "systems_checked": systems_checked,
+                        "snapshots_written": snaps_written,
+                    },
+                    log=logger,
+                )
+            except Exception as fb_exc:
+                logger.warning("[ml_pipeline] feature_builder cycle error: %s", fb_exc)
+                structured_log(
+                    "ml_pipeline",
+                    {"operation": "feature_builder_cycle", "status": "failed", "error": str(fb_exc)},
+                    log=logger,
+                )
+
+            # ── ml_engine cycle ──────────────────────────────────────────
+            try:
+                written = _ml.run_cycle(ml_conn)
+                structured_log(
+                    "ml_pipeline",
+                    {
+                        "operation": "ml_engine_cycle",
+                        "status": "ok",
+                        "predictions_written": written,
+                    },
+                    log=logger,
+                )
+            except Exception as ml_exc:
+                logger.warning("[ml_pipeline] ml_engine cycle error: %s", ml_exc)
+                structured_log(
+                    "ml_pipeline",
+                    {"operation": "ml_engine_cycle", "status": "failed", "error": str(ml_exc)},
+                    log=logger,
+                )
+
+        except Exception as exc:
+            logger.error("[ml_pipeline] Unexpected error: %s", exc, exc_info=True)
+            try:
+                if ml_conn:
+                    ml_conn.close()
+            except Exception:
+                pass
+            ml_conn = None
+
+        # Sleep for the remainder of the interval (or immediately if overrun)
+        elapsed = time.time() - cycle_start
+        sleep_for = max(0.0, ML_PIPELINE_INTERVAL_SECS - elapsed)
+        stop_event.wait(sleep_for)
+
+    logger.info("[ml_pipeline] Background worker stopped.")
+    try:
+        if ml_conn:
+            ml_conn.close()
+    except Exception:
+        pass
+
+
 def run_consumer() -> None:
     """Run the Kafka consumer loop until interrupted."""
     shutdown_requested = False
@@ -1294,6 +1427,17 @@ def run_consumer() -> None:
 
     setup_database(conn)
     ensure_kafka_topic_partitioning()
+
+    # ── Start the ML pipeline background thread ──────────────────────────────
+    _ml_stop_event = _threading.Event()
+    _ml_thread = _threading.Thread(
+        target=_ml_pipeline_worker,
+        args=(_ml_stop_event,),
+        name="ml-pipeline",
+        daemon=True,          # exits automatically when main process exits
+    )
+    _ml_thread.start()
+    logger.info("[ml_pipeline] Background thread launched (interval=%ds).", ML_PIPELINE_INTERVAL_SECS)
 
     consumer = KafkaConsumer(
         KAFKA_TOPIC,

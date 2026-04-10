@@ -2282,3 +2282,125 @@ def get_failure_risk(limit: int = 1000) -> JSONResponse:
     except Exception as exc:
         _log_failure("/ml/failure-risk", "endpoint", exc)
         return JSONResponse(content={"error": str(exc)}, status_code=500)
+
+
+# ── /ml/anomalies ────────────────────────────────────────────────────────────
+# Returns the latest anomaly prediction per system (from IsolationForest v2).
+# Query params:
+#   limit          — max rows returned (default 50)
+#   only_anomalies — if true, filter to rows where is_anomaly = TRUE
+
+@app.get("/ml/anomalies")
+def get_ml_anomalies(limit: int = 50, only_anomalies: bool = False) -> JSONResponse:
+    """
+    Latest ML anomaly predictions per system.
+
+    Returns anomaly_score (0-1 float), is_anomaly (bool), model_version,
+    and prediction_time for each system.  When ``only_anomalies=true`` only
+    rows flagged as anomalous by the Isolation Forest are returned.
+    """
+    t0 = time.time()
+    try:
+        if only_anomalies:
+            sql = """
+                SELECT DISTINCT ON (system_id)
+                    system_id,
+                    prediction_time,
+                    anomaly_score,
+                    is_anomaly,
+                    failure_probability,
+                    predicted_fault,
+                    model_version,
+                    cluster_id
+                FROM ml_predictions
+                WHERE is_anomaly = TRUE
+                ORDER BY system_id, prediction_time DESC
+                LIMIT %s
+            """
+        else:
+            sql = """
+                SELECT DISTINCT ON (system_id)
+                    system_id,
+                    prediction_time,
+                    anomaly_score,
+                    is_anomaly,
+                    failure_probability,
+                    predicted_fault,
+                    model_version,
+                    cluster_id
+                FROM ml_predictions
+                ORDER BY system_id, prediction_time DESC
+                LIMIT %s
+            """
+
+        rows = _exec_query(sql, (limit,), endpoint="/ml/anomalies")
+
+        result = []
+        for r in rows:
+            result.append({
+                "system_id":           r.get("system_id", "unknown"),
+                "prediction_time":     _iso(r.get("prediction_time")),
+                "anomaly_score":       float(r["anomaly_score"]) if r.get("anomaly_score") is not None else 0.0,
+                "is_anomaly":          bool(r.get("is_anomaly")) if r.get("is_anomaly") is not None else None,
+                "failure_probability": float(r["failure_probability"]) if r.get("failure_probability") is not None else 0.0,
+                "predicted_fault":     r.get("predicted_fault") or "NONE",
+                "model_version":       r.get("model_version") or "unknown",
+                "cluster_id":          r.get("cluster_id"),
+            })
+
+        _log_req("/ml/anomalies", (time.time() - t0) * 1000, "ok", len(result))
+        return JSONResponse(content=result)
+    except Exception as exc:
+        _log_failure("/ml/anomalies", "endpoint", exc)
+        return JSONResponse(content={"error": str(exc)}, status_code=500)
+
+
+# ── /ml/clusters ─────────────────────────────────────────────────────────────
+# Returns the latest KMeans cluster assignment per system.
+
+@app.get("/ml/clusters")
+def get_ml_clusters(limit: int = 50) -> JSONResponse:
+    """
+    Latest KMeans cluster assignments per system.
+
+    Returns cluster_id (integer 0-2 by default), anomaly_score,
+    and prediction_time.  Rows where cluster_id IS NULL were scored by
+    the heuristic fallback (sklearn not available or insufficient data).
+    """
+    t0 = time.time()
+    try:
+        rows = _exec_query(
+            """
+            SELECT DISTINCT ON (system_id)
+                system_id,
+                prediction_time,
+                cluster_id,
+                anomaly_score,
+                is_anomaly,
+                model_version
+            FROM ml_predictions
+            WHERE cluster_id IS NOT NULL
+            ORDER BY system_id, prediction_time DESC
+            LIMIT %s
+            """,
+            (limit,),
+            endpoint="/ml/clusters",
+        )
+
+        result = []
+        for r in rows:
+            result.append({
+                "system_id":       r.get("system_id", "unknown"),
+                "prediction_time": _iso(r.get("prediction_time")),
+                "cluster_id":      r.get("cluster_id"),
+                "anomaly_score":   float(r["anomaly_score"]) if r.get("anomaly_score") is not None else 0.0,
+                "is_anomaly":      bool(r.get("is_anomaly")) if r.get("is_anomaly") is not None else None,
+                "model_version":   r.get("model_version") or "unknown",
+            })
+
+        _log_req("/ml/clusters", (time.time() - t0) * 1000, "ok", len(result))
+        return JSONResponse(content=result)
+    except Exception as exc:
+        _log_failure("/ml/clusters", "endpoint", exc)
+        return JSONResponse(content={"error": str(exc)}, status_code=500)
+
