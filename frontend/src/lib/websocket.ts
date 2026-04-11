@@ -45,7 +45,8 @@ class SentinelWebSocket {
         const wsUrl = new URL(this.url);
         wsUrl.searchParams.set('token', await user.getIdToken());
         connectionUrl = wsUrl.toString();
-      } catch {
+      } catch (error) {
+        console.warn('SentinelCore websocket auth token unavailable:', error);
         useSignalStore.getState().setConnected(false);
         this.scheduleReconnect();
         return;
@@ -103,7 +104,9 @@ class SentinelWebSocket {
   private scheduleReconnect(): void {
     setTimeout(() => {
       this.retryDelay = Math.min(this.retryDelay * 2, MAX_RETRY_MS);
-      void this.connect();
+      this.connect().catch((error) => {
+        console.warn('SentinelCore websocket reconnect failed:', error);
+      });
     }, this.retryDelay);
   }
 
@@ -129,7 +132,9 @@ export function initWebSocket(): void {
   }
   if (_client) return;
   _client = new SentinelWebSocket(WS_URL);
-  void _client.connect();
+  _client.connect().catch((error) => {
+    console.warn('SentinelCore websocket startup failed:', error);
+  });
 }
 
 export function disconnectWebSocket(): void {

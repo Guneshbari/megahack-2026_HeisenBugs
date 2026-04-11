@@ -416,6 +416,27 @@ def _add_security_headers(response: Any) -> None:
     response.headers.setdefault("X-XSS-Protection", "1; mode=block")
 
 
+def _verify_websocket_token(id_token: str) -> Tuple[bool, Optional[str], str]:
+    """Validate Firebase token for websocket connections."""
+    token = _safe_text(id_token)
+    if not token:
+        return False, None, "missing_websocket_token"
+    if not _FIREBASE_ADMIN_READY:
+        return False, None, "firebase_sdk_not_ready"
+    try:
+        decoded_token = firebase_auth.verify_id_token(token, check_revoked=True)
+        uid = _safe_text(decoded_token.get("uid"))
+        if not uid:
+            return False, None, "missing_uid"
+        return True, uid, "ok"
+    except firebase_auth.RevokedIdTokenError:
+        return False, None, "revoked_token"
+    except firebase_auth.ExpiredIdTokenError:
+        return False, None, "expired_token"
+    except Exception as exc:
+        return False, None, str(exc)
+
+
 # ============================================================================
 # QUERY HELPERS
 # ============================================================================
@@ -996,29 +1017,10 @@ def get_events(
 async def stream_events(websocket: WebSocket) -> None:
     """Best-effort live event stream used by the dashboard for incremental updates."""
     if FIREBASE_AUTH_ENABLED:
-        id_token = websocket.query_params.get("token", "").strip()
-        if not id_token:
-            _log_failure("/ws/events", "auth", "missing_websocket_token")
-            await websocket.close(code=4401)
-            return
-        if not _FIREBASE_ADMIN_READY:
-            _log_failure("/ws/events", "auth", "firebase_sdk_not_ready")
-            await websocket.close(code=1013)
-            return
-        try:
-            decoded_token = firebase_auth.verify_id_token(id_token, check_revoked=True)
-            websocket.state.uid = decoded_token.get("uid", "unknown")
-        except firebase_auth.RevokedIdTokenError:
-            _log_failure("/ws/events", "auth", "revoked_token")
-            await websocket.close(code=4401)
-            return
-        except firebase_auth.ExpiredIdTokenError:
-            _log_failure("/ws/events", "auth", "expired_token")
-            await websocket.close(code=4401)
-            return
-        except Exception as exc:
-            _log_failure("/ws/events", "auth", str(exc))
-            await websocket.close(code=4401)
+        ok, _, auth_error = _verify_websocket_token(websocket.query_params.get("token", ""))
+        if not ok:
+            _log_failure("/ws/events", "auth", auth_error)
+            await websocket.close(code=1013 if auth_error == "firebase_sdk_not_ready" else 4401)
             return
 
     await websocket.accept()
