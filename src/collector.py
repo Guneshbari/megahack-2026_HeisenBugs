@@ -773,6 +773,8 @@ class KafkaManager:
             system_id = payload.get('system_id', 'unknown')
             futures = []
             for chunk_payload, chunk_event_count in self._build_payload_chunks(payload):
+                # Use a default argument to capture the current value of chunk_payload,
+                # avoiding the classic Python late-binding closure bug.
                 def _send_one(message_payload=chunk_payload):
                     return self.producer.send(self.topic, key=system_id, value=message_payload)
 

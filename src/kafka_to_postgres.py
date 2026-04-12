@@ -330,7 +330,13 @@ def _upsert_alert(
 
     if existing:
         suppressed_until = existing[2]
-        if suppressed_until and suppressed_until > datetime.now(timezone.utc):
+        if suppressed_until is not None:
+            # Guard: suppressed_until may be naive (no tzinfo) if stored without tz
+            aware_suppressed = (
+                suppressed_until if suppressed_until.tzinfo is not None
+                else suppressed_until.replace(tzinfo=timezone.utc)
+            )
+            if aware_suppressed > datetime.now(timezone.utc):
             cur.execute(
                 """
                 UPDATE alerts

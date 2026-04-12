@@ -342,7 +342,9 @@ def run_cycle(conn: Any) -> int:
     for snap in snapshots:
         sid = snap.get("system_id") or "unknown"
         prev = latest_by_system.get(sid)
-        if prev is None or snap["snapshot_time"] > prev["snapshot_time"]:
+        snap_time = snap.get("snapshot_time")
+        prev_time = prev.get("snapshot_time") if prev else None
+        if prev is None or (snap_time is not None and (prev_time is None or snap_time > prev_time)):
             latest_by_system[sid] = snap
 
     written = 0
@@ -441,6 +443,7 @@ def run_ml_engine() -> None:
             if not ok or not conn:
                 logger.error("ML engine DB reconnect failed — will retry on next cycle.")
                 conn = None
+            continue  # skip the fixed interval sleep after a reconnect
 
         time.sleep(ML_PIPELINE_INTERVAL_SECS)
 

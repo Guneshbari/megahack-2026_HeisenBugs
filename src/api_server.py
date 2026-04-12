@@ -229,7 +229,13 @@ async def lifespan(app: FastAPI):
                     ("created_at", "TIMESTAMP WITH TIME ZONE", "CURRENT_TIMESTAMP"),
                 ]:
                     cur.execute(
-                        f"ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS {column_name} {column_type} DEFAULT {default_value};"
+                        pgsql.SQL(
+                            "ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS {col} {type} DEFAULT {default};"
+                        ).format(
+                            col=pgsql.Identifier(column_name),
+                            type=pgsql.SQL(column_type),
+                            default=pgsql.SQL(default_value),
+                        )
                     )
             conn.commit()
     except Exception as exc:
@@ -255,10 +261,13 @@ app = FastAPI(
     openapi_url="/openapi.json" if _is_dev else None,
 )
 
+# Per the CORS spec, allow_credentials=True is invalid when allow_origins=["*"].
+# Credentials (cookies/auth headers) require explicit origin allow-listing.
+_cors_allow_credentials = "*" not in API_CORS_ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=API_CORS_ALLOWED_ORIGINS,
-    allow_credentials=API_CORS_ALLOWED_ORIGINS != ["*"],
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -451,7 +460,6 @@ def _exec_query(sql: str, params: Any = None, endpoint: str = "query") -> List[D
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql, params)
                 return [dict(r) for r in cur.fetchall()]
-        return []
 
     def _with_retry() -> List[Dict[str, Any]]:
         result, ok = retry_with_backoff(_run, label=endpoint)
@@ -480,7 +488,6 @@ def _exec_one(sql: str, params: Any = None, endpoint: str = "query") -> Dict[str
                 cur.execute(sql, params)
                 row = cur.fetchone()
                 return dict(row) if row else {}
-        return {}
 
     def _with_retry() -> Dict[str, Any]:
         result, ok = retry_with_backoff(_run, label=endpoint)
@@ -1150,13 +1157,15 @@ def get_systems() -> List[Dict]:
 
                 last_seen = row.get("last_seen")
                 if isinstance(last_seen, datetime):
-                    diff = (
-                        datetime.now(timezone.utc) -
-                        last_seen.replace(tzinfo=timezone.utc)
-                    ).total_seconds()
+                    # Use the stored tz-info when present; only assume UTC for naive datetimes
+                    aware_last_seen = (
+                        last_seen if last_seen.tzinfo is not None
+                        else last_seen.replace(tzinfo=timezone.utc)
+                    )
+                    diff = (datetime.now(timezone.utc) - aware_last_seen).total_seconds()
                     if diff > 120:
                         status = "offline"
-                    last_seen = last_seen.isoformat()
+                    last_seen = aware_last_seen.isoformat()
 
                 systems.append({
                     "system_id":            row["system_id"],
@@ -2089,12 +2098,15 @@ def get_live_status() -> List[Dict]:
             last_seen = row.get("last_seen")
             online    = True
             if isinstance(last_seen, datetime):
+                aware_last_seen = (
+                    last_seen if last_seen.tzinfo is not None
+                    else last_seen.replace(tzinfo=timezone.utc)
+                )
                 age    = (
-                    datetime.now(timezone.utc) -
-                    last_seen.replace(tzinfo=timezone.utc)
+                    datetime.now(timezone.utc) - aware_last_seen
                 ).total_seconds()
                 online    = age <= 120
-                last_seen = last_seen.isoformat()
+                last_seen = aware_last_seen.isoformat()
 
             result.append({
                 "system_id":            row["system_id"],
@@ -2263,7 +2275,7 @@ def get_ml_predictions(limit: int = 100) -> JSONResponse:
         return JSONResponse(content=result)
     except Exception as exc:
         _log_failure("/ml/predictions", "endpoint", exc)
-        return JSONResponse(content={"error": str(exc)}, status_code=500)
+        return JSONResponse(content={"error": "Failed to fetch ML predictions. Check server logs."}, status_code=500)
 
 @app.get("/ml/anomaly")
 def get_anomaly_scores(limit: int = 1000) -> JSONResponse:
@@ -2286,7 +2298,7 @@ def get_anomaly_scores(limit: int = 1000) -> JSONResponse:
         return JSONResponse(content=result)
     except Exception as exc:
         _log_failure("/ml/anomaly", "endpoint", exc)
-        return JSONResponse(content={"error": str(exc)}, status_code=500)
+        return JSONResponse(content={"error": "Failed to fetch anomaly scores. Check server logs."}, status_code=500)
 
 @app.get("/ml/failure-risk")
 def get_failure_risk(limit: int = 1000) -> JSONResponse:
@@ -2309,7 +2321,7 @@ def get_failure_risk(limit: int = 1000) -> JSONResponse:
         return JSONResponse(content=result)
     except Exception as exc:
         _log_failure("/ml/failure-risk", "endpoint", exc)
-        return JSONResponse(content={"error": str(exc)}, status_code=500)
+        return JSONResponse(content={"error": "Failed to fetch failure risk. Check server logs."}, status_code=500)
 
 
 # ── /ml/anomalies ────────────────────────────────────────────────────────────
@@ -2380,7 +2392,7 @@ def get_ml_anomalies(limit: int = 50, only_anomalies: bool = False) -> JSONRespo
         return JSONResponse(content=result)
     except Exception as exc:
         _log_failure("/ml/anomalies", "endpoint", exc)
-        return JSONResponse(content={"error": str(exc)}, status_code=500)
+        return JSONResponse(content={"error": "Failed to fetch ML anomalies. Check server logs."}, status_code=500)
 
 
 # ── /ml/clusters ─────────────────────────────────────────────────────────────
@@ -2430,4 +2442,4 @@ def get_ml_clusters(limit: int = 50) -> JSONResponse:
         return JSONResponse(content=result)
     except Exception as exc:
         _log_failure("/ml/clusters", "endpoint", exc)
-        return JSONResponse(content={"error": str(exc)}, status_code=500)
+        return JSONResponse(content={"error": "Failed to fetch ML clusters. Check server logs."}, status_code=500)
