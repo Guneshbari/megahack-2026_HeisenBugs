@@ -8,6 +8,8 @@ import type {
   SystemFailureCount,
   MLPrediction,
   FeatureSnapshot,
+  MLAnomaly,
+  MLCluster,
 } from '../types/telemetry';
 
 export const RECENT_EVENTS_LIMIT = 1000;
@@ -366,5 +368,36 @@ export async function fetchFeatureSnapshots(system_id?: string, limit = 100): Pr
   const data = system_id
     ? MOCK_FEATURE_SNAPSHOTS.filter((s) => s.system_id === system_id)
     : MOCK_FEATURE_SNAPSHOTS;
+  return Promise.resolve(data.slice(0, limit));
+}
+
+// ── ML Anomalies (v2-isof) ─────────────────────────────────────────────────
+
+export async function fetchMLAnomalies(limit = 50, onlyAnomalies = false): Promise<MLAnomaly[]> {
+  const data: MLAnomaly[] = MOCK_ML_PREDICTIONS.map((p) => ({
+    system_id:           p.system_id,
+    prediction_time:     p.prediction_time,
+    anomaly_score:       p.anomaly_score,
+    is_anomaly:          p.anomaly_score >= 0.7,
+    failure_probability: p.failure_probability,
+    predicted_fault:     p.predicted_fault,
+    model_version:       p.model_version ?? 'v1.4.2',
+    cluster_id:          p.cluster_id ?? null,
+  }));
+  const filtered = onlyAnomalies ? data.filter((d) => d.is_anomaly) : data;
+  return Promise.resolve(filtered.slice(0, limit));
+}
+
+// ── ML Clusters (KMeans) ───────────────────────────────────────────────────
+
+export async function fetchMLClusters(limit = 50): Promise<MLCluster[]> {
+  const data: MLCluster[] = MOCK_ML_PREDICTIONS.map((p, i) => ({
+    system_id:       p.system_id,
+    prediction_time: p.prediction_time,
+    cluster_id:      i % 3,            // 3 mock clusters: 0, 1, 2
+    anomaly_score:   p.anomaly_score,
+    is_anomaly:      p.anomaly_score >= 0.7,
+    model_version:   p.model_version ?? 'v1.4.2',
+  }));
   return Promise.resolve(data.slice(0, limit));
 }

@@ -1608,7 +1608,11 @@ def get_pipeline_health_status() -> Dict:
         status = "OK"
         
         if isinstance(latest, datetime):
-            delay_seconds = (datetime.now(timezone.utc) - latest.replace(tzinfo=timezone.utc)).total_seconds()
+            aware_latest = (
+                latest if latest.tzinfo is not None
+                else latest.replace(tzinfo=timezone.utc)
+            )
+            delay_seconds = (datetime.now(timezone.utc) - aware_latest).total_seconds()
             if delay_seconds < 60:
                 status = "OK"
             elif delay_seconds < 300:
@@ -1990,10 +1994,11 @@ def get_pipeline_health() -> Dict:
         kafka_lag       = 0
         lag_status      = "Optimal"
         if isinstance(latest, datetime):
-            age = (
-                datetime.now(timezone.utc) -
-                latest.replace(tzinfo=timezone.utc)
-            ).total_seconds()
+            aware_latest = (
+                latest if latest.tzinfo is not None
+                else latest.replace(tzinfo=timezone.utc)
+            )
+            age = (datetime.now(timezone.utc) - aware_latest).total_seconds()
             if age > 300:
                 kafka_lag  = int(age)
                 lag_status = "Degraded"

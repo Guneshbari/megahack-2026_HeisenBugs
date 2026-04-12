@@ -58,3 +58,10 @@ node_modules/
 
 .mcp.json
 .opencode.json
+.claude/
+.cursorrules
+.windsurfrules
+.gemini/
+GEMINI.md
+CLAUDE.md
+AGENTS.md

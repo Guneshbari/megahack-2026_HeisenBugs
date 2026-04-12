@@ -290,7 +290,7 @@ export async function fetchFeatureSnapshots(systemId?: string, limit = 100): Pro
  * @param onlyAnomalies When true, only returns systems flagged as anomalous.
  */
 export async function fetchMLAnomalies(limit = 50, onlyAnomalies = false): Promise<MLAnomaly[]> {
-  if (USE_MOCK_DATA) return [];
+  if (USE_MOCK_DATA) return mockApi.fetchMLAnomalies(limit, onlyAnomalies);
   return fetchJSON<MLAnomaly[]>('/ml/anomalies', {
     limit,
     only_anomalies: onlyAnomalies ? 'true' : 'false',
@@ -302,7 +302,7 @@ export async function fetchMLAnomalies(limit = 50, onlyAnomalies = false): Promi
  * Only returns systems where cluster_id IS NOT NULL (i.e., scored by sklearn).
  */
 export async function fetchMLClusters(limit = 50): Promise<MLCluster[]> {
-  if (USE_MOCK_DATA) return [];
+  if (USE_MOCK_DATA) return mockApi.fetchMLClusters(limit);
   return fetchJSON<MLCluster[]>('/ml/clusters', { limit });
 }
 
