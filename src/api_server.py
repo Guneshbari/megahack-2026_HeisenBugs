@@ -936,7 +936,7 @@ def _log_security_posture() -> None:
     if API_CORS_ALLOWED_ORIGINS == ["*"]:
         _log_failure("/startup", "security_posture", "wildcard_cors_origins_enabled")
 
-    if _DB_CONFIG.get("password", "") in ("", "changeme123"):
+    if __DB_CONFIG.get("password", "") in ("", "changeme123"):
         _log_failure("/startup", "security_posture", "weak_or_default_database_password_in_use")
 
     if not FIREBASE_AUTH_ENABLED:
