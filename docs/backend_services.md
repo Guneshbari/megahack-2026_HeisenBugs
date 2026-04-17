@@ -45,8 +45,9 @@ Background worker compiling high-frequency `events` log insertions into system-w
   - Writes heavily compressed `feature_snapshots` mapping complex log queries into a single database row, permitting instantaneous UI responsiveness over thousands of systems.
 
 ## 4. `ml_engine.py` (The Predictive Analytics Module)
-Background worker analyzing `feature_snapshots` data directly and computing likely imminent system vulnerabilities.
+Background worker analyzing `feature_snapshots` data directly and computing likely imminent system vulnerabilities using an Isolation Forest ML pipeline.
 - **Key Features:**
-  - Maps anomalies to distinct `failure_probability` scoring.
+  - Maps anomalies to distinct `failure_probability` scoring and calculates feature clustering insights.
+  - Implements non-blocking ML execution triggered safely by the `feature_builder` after data ingestion.
   - Outputs directly to `ml_predictions` schemas to be historically grafted within `/ml/*` API views.
-  - Pre-established to cleanly consume `scikit-learn` joblib objects.
+  - Consumes domain-specific configuration variables exclusively through `src/shared/ml_constants.py`.

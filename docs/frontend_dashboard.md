@@ -22,6 +22,7 @@ flowchart TD
         B(EventsPage\nStreaming Data)
         C(SystemsPage\nRemote Executions)
         D(AlertsPage\nNotification Rules)
+        E(MLIntelligencePage\nML Clustering)
     end
     
     Pages --> Page Modules
@@ -35,6 +36,7 @@ The App isolates heavy component tracking out of the index mapping. Major functi
 - **`AnalyticsPage.tsx`:** Modular graph views offering fully customizable `localStorage` widgets for advanced filtering timelines tracking `/metrics` behavior over time inputs.
 - **`AlertsPage.tsx`:** Centralized logic combining `/alerts/rules` and recent notification fetching into interactive modal creations triggering backend mutations.
 - **`EventsPage.tsx`:** Render-safe massive list mapping handling live pause arrays to securely limit infinite scrolling memory leaks during intense terminal streams.
+- **`MLIntelligencePage.tsx`:** Real-time modular SOC interface using Zustand state management to track Isolation Forest clustering and anomaly tracking.
 - **`SystemsPage.tsx`:** Administrative node-control wrapping simulated POST terminal hooks back to individual Windows IP instances.
 
 ## Authentication Cycle

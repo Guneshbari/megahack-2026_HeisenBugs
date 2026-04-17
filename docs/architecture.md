@@ -56,7 +56,7 @@ Client endpoints execute the Python-based `collector.py`, tracking WMI performan
 `kafka_to_postgres.py` reads JSON topics asynchronously. All database commits are heavily wrapped in isolated connection pools and `CircuitBreaker` classes. Duplicate hashes hit database unicity constraints, ensuring exactly-once ingestion scaling.
 
 ## 3. Worker Architecture
-SentinelCore avoids executing computational heavy-lifting while consuming HTTP requests. Instead, standard `events` are parsed by background loops (`feature_builder.py` and `ml_engine.py`) which produce statistical subsets named `feature_snapshots` and `ml_predictions`. 
+SentinelCore avoids executing computational heavy-lifting while consuming HTTP requests. Instead, standard `events` are parsed by background loops (`feature_builder.py` and `ml_engine.py`) which produce statistical subsets named `feature_snapshots` and `ml_predictions`. These components rely on a modular configuration layer (`src/shared/`) using distinct domain constants (e.g. `ml_constants.py`, `kafka_constants.py`) to reduce tight coupling.
 
 ## 4. Analytical Dashboard
 The FastAPI Backend sits behind Google Firebase Identity verification logic. Upon successful login, the React Dashboard renders statistical subsets in customizable `recharts` graphs using the read-optimized feature pools heavily mitigating database CPU stress.

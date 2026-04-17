@@ -61,6 +61,7 @@ Exposes the predictive analytics framework passively evaluating `feature_snapsho
 - **`GET /ml/predictions`:** Exhaustive JSON lists of historical system profiles.
 - **`GET /ml/anomaly`:** Time-series formatted anomaly grades.
 - **`GET /ml/failure-risk`:** Likelihood percentages tied to extrapolated fault_types.
+- **`GET /ml/clustering`:** Isolation Forest cluster grouping insights for SOC dashboard tracking.
 
 ### 7. Core Internals
 - **`GET /pipeline-health`:** High-level ingestion and processing speeds across Kafka limits.

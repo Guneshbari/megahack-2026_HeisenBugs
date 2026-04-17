@@ -8,6 +8,7 @@
 #   kafka_to_postgres.py  — Kafka consumer → PostgreSQL writer
 #   api_server.py         — FastAPI dashboard backend
 #   feature_builder.py    — ML snapshot generator
+#   ml_engine.py          — Predictive Analytics module
 #   analyzer.py           — offline event analyzer (optional)
 
 # ── Kafka consumer ────────────────────────────────────────────────────────────

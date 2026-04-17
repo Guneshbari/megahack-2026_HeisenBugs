@@ -7,9 +7,10 @@
 #  src/kafka_to_postgres.py  → kafka-python-ng, psycopg2-binary
 #  src/api_server.py         → fastapi, uvicorn, psycopg2-binary, pydantic
 #  src/feature_builder.py    → psycopg2-binary
+#  src/ml_engine.py          → psycopg2-binary, scikit-learn, numpy, pandas
 #  src/sentinel_utils.py     → psycopg2-binary
 #  src/analyzer.py           → stdlib only (json, re, argparse, xml, etc.)
-#  src/shared_constants.py   → stdlib only
+#  src/shared/ (namespace)   → stdlib only
 #  tests/test_e2e.py         → pytest, requests
 #  tests/test_live_errors.py → pytest, requests (+ pywin32 on Windows)
 #  tests/validate_collector.py → stdlib only
@@ -45,6 +46,11 @@ uvicorn[standard]>=0.41.0
 
 # ── Data validation — pulled by FastAPI; used for request/response models ─────
 pydantic>=2.12.5
+
+# ── Machine Learning (ml_engine) ─────────────────────────────────────────────
+scikit-learn>=1.5.0
+numpy>=1.26.0
+pandas>=2.2.0
 
 # ── Testing framework (tests/) ───────────────────────────────────────────────
 pytest>=9.0.2
