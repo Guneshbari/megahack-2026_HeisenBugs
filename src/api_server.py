@@ -31,6 +31,7 @@ import psycopg2
 import psycopg2.pool
 import psycopg2.extras
 import psycopg2.sql as pgsql
+import psutil
 
 try:
     import firebase_admin
@@ -1020,6 +1021,18 @@ def get_events(
         return []
 
 
+def _get_resource_snapshot() -> Dict[str, float]:
+    """Lightweight system metrics snapshot for WebSocket heartbeats."""
+    try:
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory().percent
+        disk_obj = psutil.disk_usage("/")
+        disk = 100.0 - (disk_obj.percent)  # free %
+    except Exception:
+        cpu, mem, disk = 0.0, 0.0, 0.0
+    return {"cpu": round(cpu, 1), "memory": round(mem, 1), "disk": round(disk, 1)}
+
+
 @app.websocket("/ws/events")
 async def stream_events(websocket: WebSocket) -> None:
     """Best-effort live event stream used by the dashboard for incremental updates."""
@@ -1052,7 +1065,11 @@ async def stream_events(websocket: WebSocket) -> None:
         if bootstrap_rows:
             bootstrap_rows.reverse()
             last_event_id = max(_i(row.get("id")) for row in bootstrap_rows)
-            await websocket.send_json([_format_event_row(dict(row), include_raw_xml=False) for row in bootstrap_rows])
+            # Typed bootstrap burst
+            await websocket.send_json({
+                "type": "event",
+                "data": [_format_event_row(dict(row), include_raw_xml=False) for row in bootstrap_rows],
+            })
 
         while True:
             rows = _exec_query(
@@ -1075,7 +1092,18 @@ async def stream_events(websocket: WebSocket) -> None:
 
             if rows:
                 last_event_id = max(_i(row.get("id")) for row in rows)
-                await websocket.send_json([_format_event_row(dict(row), include_raw_xml=False) for row in rows])
+                await websocket.send_json({
+                    "type": "event",
+                    "data": [_format_event_row(dict(row), include_raw_xml=False) for row in rows],
+                })
+
+            # Heartbeat every cycle — keeps connection alive and feeds UI metrics
+            metrics = _get_resource_snapshot()
+            await websocket.send_json({
+                "type": "heartbeat",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **metrics,
+            })
 
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:

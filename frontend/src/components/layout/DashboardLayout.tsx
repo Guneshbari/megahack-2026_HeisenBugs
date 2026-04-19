@@ -19,6 +19,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { useSignalStore } from '../../store/signalStore';
+import { useHeartbeatStore } from '../../store/heartbeatStore';
 import { DASHBOARD_DATA_MODE, getTransportStatusLabel, USE_MOCK_DATA } from '../../lib/api';
 import { disconnectWebSocket, initWebSocket } from '../../lib/websocket';
 
@@ -39,8 +40,11 @@ export default function DashboardLayout() {
   const loadData = useDashboardStore((s) => s.loadData);
   const tickRefresh = useDashboardStore((s) => s.tickRefresh);
   const autoRefresh = useDashboardStore((s) => s.autoRefresh);
-  const isConnected = useSignalStore((s) => s.isConnected);
+  const isConnected    = useSignalStore((s) => s.isConnected);
   const transportLabel = getTransportStatusLabel(isConnected);
+  const hbLatest  = useHeartbeatStore((s) => s.latest);
+  const hbIsAlive = useHeartbeatStore((s) => s.isAlive);
+  const isIdle    = useHeartbeatStore((s) => s.isIdle);
 
   useEffect(() => {
     loadData();
@@ -162,6 +166,53 @@ export default function DashboardLayout() {
           )}
         </div>
 
+        {/* ── System metrics from heartbeat ───────────────────────── */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          {hbLatest && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontFamily: 'Inter,monospace', fontSize: 9, color: '#6B7C93' }}>CPU</span>
+                <span
+                  style={{
+                    fontFamily: 'Inter,monospace',
+                    fontSize: 10,
+                    color: hbLatest.cpu > 85 ? '#FF3B3B' : hbLatest.cpu > 60 ? '#FF8A00' : '#00C853',
+                    fontWeight: 600,
+                  }}
+                >
+                  {hbLatest.cpu.toFixed(1)}%
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontFamily: 'Inter,monospace', fontSize: 9, color: '#6B7C93' }}>MEM</span>
+                <span
+                  style={{
+                    fontFamily: 'Inter,monospace',
+                    fontSize: 10,
+                    color: hbLatest.memory > 90 ? '#FF3B3B' : hbLatest.memory > 75 ? '#FF8A00' : '#E6EDF3',
+                    fontWeight: 600,
+                  }}
+                >
+                  {hbLatest.memory.toFixed(1)}%
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontFamily: 'Inter,monospace', fontSize: 9, color: '#6B7C93' }}>DISK FREE</span>
+                <span
+                  style={{
+                    fontFamily: 'Inter,monospace',
+                    fontSize: 10,
+                    color: hbLatest.disk < 10 ? '#FF3B3B' : hbLatest.disk < 20 ? '#FF8A00' : '#E6EDF3',
+                    fontWeight: 600,
+                  }}
+                >
+                  {hbLatest.disk.toFixed(1)}%
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           {criticalCount > 0 && (
             <span
@@ -176,6 +227,19 @@ export default function DashboardLayout() {
               {criticalCount} Critical Alert{criticalCount !== 1 && 's'}
             </span>
           )}
+          {/* Connection status dot driven by heartbeat */}
+          <div
+            title={hbIsAlive ? 'WS heartbeat alive' : 'WS heartbeat lost'}
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: hbIsAlive ? '#00C853' : '#FF3B3B',
+              boxShadow: hbIsAlive ? '0 0 6px #00C853' : '0 0 6px #FF3B3B',
+              flexShrink: 0,
+              animation: hbIsAlive ? 'soc-blink 2s ease-in-out infinite' : 'none',
+            }}
+          />
           <span
             style={{
               fontFamily: 'Inter,monospace',
@@ -299,6 +363,25 @@ export default function DashboardLayout() {
           background: '#0A0F14',
         }}
       >
+        {!USE_MOCK_DATA && isIdle && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 12px',
+              background: '#101820',
+              borderBottom: '1px solid #1F2A37',
+              fontFamily: 'Inter,monospace',
+              fontSize: 10,
+              color: '#6B7C93',
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#00C853', display: 'inline-block' }} />
+            System running normally. No new events.
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

@@ -9,6 +9,7 @@
  *  - USE_MOCK_DATA = true → WebSocket is stubbed (no connection attempt)
  */
 import { useSignalStore } from '../store/signalStore';
+import { useHeartbeatStore } from '../store/heartbeatStore';
 import { isApiSessionAuthenticated, USE_MOCK_DATA } from './api';
 import { auth } from './firebase';
 import type { TelemetryEvent } from '../types/telemetry';
@@ -68,11 +69,35 @@ class SentinelWebSocket {
 
     this.ws.onmessage = (ev: MessageEvent) => {
       try {
-        const data = JSON.parse(ev.data as string);
-        if (Array.isArray(data)) {
-          this.buffer.push(...(data as TelemetryEvent[]));
+        const msg = JSON.parse(ev.data as string);
+
+        // ── Typed envelope (backend v2) ──────────────────────────────
+        if (msg && typeof msg === 'object' && !Array.isArray(msg) && msg.type) {
+          if (msg.type === 'event') {
+            const events: TelemetryEvent[] = Array.isArray(msg.data)
+              ? (msg.data as TelemetryEvent[])
+              : [msg.data as TelemetryEvent];
+            if (events.length > 0) {
+              this.buffer.push(...events);
+              this.scheduleFlush();
+              useHeartbeatStore.getState().onEventReceived();
+            }
+          } else if (msg.type === 'heartbeat') {
+            useHeartbeatStore.getState().onHeartbeat({
+              timestamp: msg.timestamp as string,
+              cpu:       Number(msg.cpu)    || 0,
+              memory:    Number(msg.memory) || 0,
+              disk:      Number(msg.disk)   || 0,
+            });
+          }
+          return;
+        }
+
+        // ── Legacy: bare array (pre-typed backend) ───────────────────
+        if (Array.isArray(msg)) {
+          this.buffer.push(...(msg as TelemetryEvent[]));
         } else {
-          this.buffer.push(data as TelemetryEvent);
+          this.buffer.push(msg as TelemetryEvent);
         }
         this.scheduleFlush();
       } catch {
