@@ -337,18 +337,18 @@ def _upsert_alert(
                 else suppressed_until.replace(tzinfo=timezone.utc)
             )
             if aware_suppressed > datetime.now(timezone.utc):
-            cur.execute(
-                """
-                UPDATE alerts
-                SET
-                    last_seen_at = NOW(),
-                    source_event_id = %s,
-                    occurrence_count = occurrence_count + 1
-                WHERE id = %s
-                """,
-                (source_event_id, existing[0]),
-            )
-            return
+                cur.execute(
+                    """
+                    UPDATE alerts
+                    SET
+                        last_seen_at = NOW(),
+                        source_event_id = %s,
+                        occurrence_count = occurrence_count + 1
+                    WHERE id = %s
+                    """,
+                    (source_event_id, existing[0]),
+                )
+                return
 
         if not existing[1]:
             cur.execute(
