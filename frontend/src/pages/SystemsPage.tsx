@@ -195,7 +195,7 @@ export default function SystemsPage() {
                   {/* Hostname */}
                   <div className="flex-1 min-w-[120px] truncate" style={{ position: 'sticky', left: 24 }}>
                     <span className="font-mono text-[11px] text-[#E6EDF3] font-medium">
-                      {sys.hostname.split('.')[0]}
+                      {sys.hostname.split('.')[0]} <span style={{ color: '#6B7C93', fontWeight: 400 }}>• {sys.system_id.substring(0, 5)}</span>
                     </span>
                     <span className="text-[#6B7C93] text-[10px] ml-1">
                       .{sys.hostname.split('.').slice(1).join('.')}
@@ -289,7 +289,7 @@ export default function SystemsPage() {
               <div>
                 <div className="text-[11px] text-[#6B7C93] uppercase tracking-wider mb-2 font-mono font-semibold">System</div>
                 <div className="grid grid-cols-2 gap-x-8 gap-y-2">
-                  <div className="font-mono text-[#E6EDF3]"><span className="text-[#6B7C93]">HOST: </span>{selected.hostname.split('.')[0]}</div>
+                  <div className="font-mono text-[#E6EDF3]"><span className="text-[#6B7C93]">HOST: </span>{selected.hostname.split('.')[0]} • {selected.system_id.substring(0, 5)}</div>
                   <div className="font-mono text-[#E6EDF3]"><span className="text-[#6B7C93]">IP: </span>{selected.ip_address}</div>
                   <div className="font-mono text-[#E6EDF3]"><span className="text-[#6B7C93]">OS: </span>{selected.os_version}</div>
                   <div className="font-mono text-[#E6EDF3]"><span className="text-[#6B7C93]">SEEN: </span>{timeAgo(selected.last_seen)}</div>

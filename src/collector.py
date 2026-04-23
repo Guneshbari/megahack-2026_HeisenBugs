@@ -442,17 +442,28 @@ def build_diagnostic_context(resources: Dict) -> Dict:
 # ============================================================================
 
 def get_system_id() -> str:
-    if _CONFIG["agent"].get("system_id_mode") == "AUTO":
-        return socket.gethostname()
+    """Enforce a persistent UUID. Generated once, saved locally."""
+    id_file = os.path.join(SCRIPT_DIR, ".sentinel_id")
+    if os.path.exists(id_file):
+        try:
+            with open(id_file, 'r', encoding='utf-8') as f:
+                saved_id = f.read().strip()
+                if saved_id:
+                    return saved_id
+        except Exception as e:
+            _log_collector_failure("get_system_id_read", e)
+            print(f"Warning: Could not read .sentinel_id: {e}", file=sys.stderr)
+
+    # Generate new UUID if missing or unreadable
+    new_id = str(uuid.uuid4())
     try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0, winreg.KEY_READ)
-        guid, _ = winreg.QueryValueEx(key, "MachineGuid")
-        winreg.CloseKey(key)
-        return guid
+        with open(id_file, 'w', encoding='utf-8') as f:
+            f.write(new_id)
     except Exception as e:
-        _log_collector_failure("get_system_id", e)
-        print(f"Warning: Could not read MachineGuid: {e}", file=sys.stderr)
-        return "UNKNOWN"
+        _log_collector_failure("get_system_id_write", e)
+        print(f"Warning: Could not save .sentinel_id: {e}", file=sys.stderr)
+        
+    return new_id
 
 
 def get_hostname() -> str:
@@ -522,14 +533,24 @@ def get_resource_snapshot() -> Dict:
         # Determine the correct disk path per OS to avoid silent zero-returns on Windows
         disk_path = 'C:\\' if sys.platform.startswith('win') else '/'
         disk = psutil.disk_usage(disk_path)
+        
+        # Hardware fingerprinting for debugging (mac address hash, etc)
+        mac_hash = "unknown"
+        try:
+            mac_int = uuid.getnode()
+            mac_hash = hashlib.sha256(str(mac_int).encode()).hexdigest()[:8]
+        except Exception:
+            pass
+            
         return {
             'cpu_usage_percent':    round(psutil.cpu_percent(interval=1.0), 2),
             'memory_usage_percent': round((mem.used / mem.total) * 100, 2),
-            'disk_free_percent':    round(100.0 - disk.percent, 2)
+            'disk_free_percent':    round(100.0 - disk.percent, 2),
+            'hw_mac_hash':          mac_hash
         }
     except Exception:
         _log_collector_failure("get_resource_snapshot", "resource snapshot failed")
-        return {'cpu_usage_percent': 0.0, 'memory_usage_percent': 0.0, 'disk_free_percent': 0.0}
+        return {'cpu_usage_percent': 0.0, 'memory_usage_percent': 0.0, 'disk_free_percent': 0.0, 'hw_mac_hash': 'unknown'}
 
 # ============================================================================
 # EVENT PARSING

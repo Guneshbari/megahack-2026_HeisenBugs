@@ -871,6 +871,12 @@ def update_heartbeat(cur: Any, msg: Dict[str, Any], heartbeat_time: Optional[dat
     memory = _extract_resource_metric(system_info, events, "memory_usage_percent", 0.0)
     disk = _extract_resource_metric(system_info, events, "disk_free_percent", 100.0)
 
+    # Check for hostname identity change
+    cur.execute("SELECT system_id FROM system_heartbeats WHERE hostname = %s AND system_id != %s", (hostname, system_id))
+    existing = cur.fetchall()
+    if existing:
+        logger.warning(f"IDENTITY WARNING: Hostname '{hostname}' is reporting with system_id '{system_id}', but was previously seen as {[r[0] for r in existing]}. Possible reinstall or tampering.")
+
     cur.execute(
         """
         INSERT INTO system_heartbeats (
@@ -1022,6 +1028,10 @@ def process_message(conn: Any, msg: Dict[str, Any]) -> bool:
     `event_hash`, and the function preserves the legacy bool return contract.
     """
     system_id = msg.get("system_id") or (msg.get("system_info") or {}).get("system_id") or "unknown"
+    if not system_id or system_id == "unknown":
+        logger.error(f"REJECTED: Payload missing valid system_id: {msg}")
+        return False
+
     rows = extract_and_prepare_events(msg)
     write_started_at = time.time()
 

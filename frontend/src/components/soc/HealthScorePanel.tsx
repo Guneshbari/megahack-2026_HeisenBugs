@@ -128,7 +128,7 @@ export default function HealthScorePanel() {
 
               {/* Hostname */}
               <span className="font-mono text-[10px] text-[#94A3B8] flex-1 truncate">
-                {sys.hostname.split('.')[0]}
+                {sys.hostname.split('.')[0]} <span style={{ color: '#475569' }}>• {sys.systemId.substring(0, 5)}</span>
               </span>
 
               {/* CPU mini bar */}
