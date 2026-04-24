@@ -237,7 +237,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         fetchSystemFailures(6, windowMin),
         fetchPipelineHealth(),
         fetchMLPredictions(),
-        fetchFeatureSnapshots(),
+        fetchFeatureSnapshots(undefined, 500),
       ]);
 
       const partialUpdate: Partial<DashboardState> = {};

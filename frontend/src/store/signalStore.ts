@@ -183,6 +183,8 @@ interface SignalState {
   setMLPredictions:      (preds: MLPrediction[]) => void;
   /** Replace feature snapshots (called by DashboardContext on each poll) */
   setFeatureSnapshots:   (snaps: FeatureSnapshot[]) => void;
+  /** Merge live feature snapshots from WebSocket */
+  mergeFeatureSnapshots:  (snaps: FeatureSnapshot[]) => void;
   setConnected:          (connected: boolean) => void;
   /** Force signal recompute (e.g. after time window rolls) */
   recompute:             () => void;
@@ -234,6 +236,20 @@ export const useSignalStore = create<SignalState>((set, get) => ({
   setMLPredictions: (mlPredictions) => set({ mlPredictions }),
 
   setFeatureSnapshots: (featureSnapshots) => set({ featureSnapshots }),
+
+  mergeFeatureSnapshots: (snaps) => {
+    if (snaps.length === 0) return;
+    const merged = [...snaps, ...get().featureSnapshots]
+      .sort((a, b) => new Date(b.snapshot_time).getTime() - new Date(a.snapshot_time).getTime());
+    const seen = new Set<string>();
+    const featureSnapshots = merged.filter((snap) => {
+      const key = `${snap.system_id}::${snap.snapshot_time}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 500);
+    set({ featureSnapshots });
+  },
 
   setConnected: (isConnected) => set({ isConnected }),
 

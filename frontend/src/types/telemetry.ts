@@ -61,14 +61,18 @@ export interface Alert {
 
 export interface MetricPoint {
   timestamp: string;
+  system_id?: string;
   event_count: number;
-  critical_count: number;
-  error_count: number;
-  warning_count: number;
-  info_count: number;
-  avg_cpu: number;
-  avg_memory: number;
-  avg_disk_free: number;
+  critical_count?: number;
+  error_count?: number;
+  warning_count?: number;
+  info_count?: number;
+  avg_cpu?: number;
+  avg_memory?: number;
+  avg_disk_free?: number;
+  cpu_usage_percent?: number;
+  memory_usage_percent?: number;
+  disk_free_percent?: number;
 }
 
 export interface SeverityCount {

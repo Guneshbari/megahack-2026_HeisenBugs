@@ -349,20 +349,27 @@ export async function fetchMLPredictions(limit = 100): Promise<MLPrediction[]> {
 
 // ── Feature Snapshots ────────────────────────────────────
 
-const MOCK_FEATURE_SNAPSHOTS: FeatureSnapshot[] = MOCK_SYSTEMS.map((sys) => ({
-  system_id:          sys.system_id,
-  snapshot_time:      new Date(Date.now() - 300_000).toISOString(),
-  total_events:       sys.total_events,
-  critical_count:     Math.floor(sys.total_events * 0.08),
-  error_count:        Math.floor(sys.total_events * 0.15),
-  warning_count:      Math.floor(sys.total_events * 0.25),
-  info_count:         Math.floor(sys.total_events * 0.52),
-  dominant_fault_type: FAULT_TYPES[MOCK_SYSTEMS.indexOf(sys) % FAULT_TYPES.length],
-  avg_confidence:     0.55 + (MOCK_SYSTEMS.indexOf(sys) % 4) * 0.1,
-  cpu_usage_percent:  sys.cpu_usage_percent,
-  memory_usage_percent: sys.memory_usage_percent,
-  disk_free_percent:  sys.disk_free_percent,
-}));
+const MOCK_FEATURE_SNAPSHOTS: FeatureSnapshot[] = MOCK_SYSTEMS.flatMap((sys, sysIndex) => (
+  Array.from({ length: 60 }).map((_, i) => {
+    const minutesAgo = 59 - i;
+    const wave = Math.sin((i + sysIndex) / 5);
+    const jitter = Math.cos((i + sysIndex * 3) / 7);
+    return {
+      system_id:          sys.system_id,
+      snapshot_time:      new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+      total_events:       Math.max(0, sys.total_events - minutesAgo * (sysIndex + 1)),
+      critical_count:     Math.floor(sys.total_events * 0.08),
+      error_count:        Math.floor(sys.total_events * 0.15),
+      warning_count:      Math.floor(sys.total_events * 0.25),
+      info_count:         Math.floor(sys.total_events * 0.52),
+      dominant_fault_type: FAULT_TYPES[sysIndex % FAULT_TYPES.length],
+      avg_confidence:     0.55 + (sysIndex % 4) * 0.1,
+      cpu_usage_percent:  Math.max(0, Math.min(100, sys.cpu_usage_percent + wave * 12 + jitter * 4)),
+      memory_usage_percent: Math.max(0, Math.min(100, sys.memory_usage_percent + wave * 8)),
+      disk_free_percent:  Math.max(0, Math.min(100, sys.disk_free_percent - i * 0.03 + jitter * 2)),
+    };
+  })
+));
 
 export async function fetchFeatureSnapshots(system_id?: string, limit = 100): Promise<FeatureSnapshot[]> {
   const data = system_id

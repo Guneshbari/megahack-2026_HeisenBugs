@@ -163,7 +163,7 @@ export default function MetricsCharts() {
           {(['CRITICAL', 'ERROR', 'WARNING', 'INFO'] as const).map((sev) => {
             const total = metrics.reduce<number>((s, m) => {
               const k = `${sev.toLowerCase()}_count` as keyof MetricPoint;
-              return s + ((m[k] as number) ?? 0);
+              return s + Number(m[k] ?? 0);
             }, 0);
             const colors: Record<string, string> = {
               CRITICAL: '#DC2626', ERROR: '#F97316', WARNING: '#FACC15', INFO: '#38BDF8',

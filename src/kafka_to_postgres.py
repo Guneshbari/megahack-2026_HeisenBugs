@@ -1460,7 +1460,7 @@ def run_consumer() -> None:
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         group_id=KAFKA_GROUP_ID,
         client_id=KAFKA_CONSUMER_CLIENT_ID,
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest",
         enable_auto_commit=False,
         consumer_timeout_ms=KAFKA_POLL_TIMEOUT_MS,
         max_poll_records=KAFKA_MAX_POLL_RECORDS,

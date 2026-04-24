@@ -12,7 +12,7 @@ import { useSignalStore } from '../store/signalStore';
 import { useHeartbeatStore } from '../store/heartbeatStore';
 import { isApiSessionAuthenticated, USE_MOCK_DATA } from './api';
 import { auth } from './firebase';
-import type { TelemetryEvent } from '../types/telemetry';
+import type { FeatureSnapshot, TelemetryEvent } from '../types/telemetry';
 
 
 
@@ -94,6 +94,11 @@ class SentinelWebSocket {
               this.scheduleFlush();
               useHeartbeatStore.getState().onEventReceived();
             }
+          } else if (msg.type === 'feature_snapshot' || msg.type === 'feature_snapshots') {
+            const snapshots = Array.isArray(msg.data)
+              ? (msg.data as FeatureSnapshot[])
+              : [msg.data as FeatureSnapshot];
+            useSignalStore.getState().mergeFeatureSnapshots(snapshots);
           } else if (msg.type === 'heartbeat') {
             useHeartbeatStore.getState().onHeartbeat({
               timestamp: msg.timestamp as string,
